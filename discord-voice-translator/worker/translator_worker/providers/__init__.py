@@ -61,6 +61,8 @@ def build(cfg, hw, plan) -> tuple[Providers, list[dict]]:
 
     # ---------------------------------------------------------------- STT
     try:
+        if cfg.policy.mode == "cloud":
+            raise RuntimeError("PIPELINE_MODE=cloud: local model not loaded")
         from .stt_faster_whisper import FasterWhisperSTT
         stt = FasterWhisperSTT(plan.stt_model, device=device, compute_type=plan.stt_compute,
                                cpu_threads=cfg.hardware.cpu_threads, num_workers=plan.stt_workers,
@@ -98,6 +100,8 @@ def build(cfg, hw, plan) -> tuple[Providers, list[dict]]:
 
     # ---------------------------------------------------------------- MT
     try:
+        if cfg.policy.mode == "cloud":
+            raise RuntimeError("PIPELINE_MODE=cloud: local model not loaded")
         from .mt_ct2 import CT2Translator
         mt = CT2Translator(plan.mt_family, plan.mt_model, plan.mt_tokenizer_repo, models_dir=models,
                            device=device, compute_type=plan.mt_compute, beam_size=cfg.mt.beam_size)

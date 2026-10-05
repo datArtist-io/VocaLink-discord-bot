@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Translation Analytics</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6570;--line:#e3e6ea;--accent:#4f5bd5;--ok:#1f8a4c;--bad:#c2410c;--bar:#c9cdf5}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--panel:#171a21;--ink:#e8ebf0;--muted:#9aa3ad;--line:#262b35;--accent:#7b86ff;--ok:#47c27c;--bad:#f47c4a;--bar:#39407a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:16px;border-bottom:1px solid var(--line);background:var(--panel)}h1{margin:0;font-size:18px}.sub{color:var(--muted);font-size:13px}
+main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;grid-column:1/-1}@media (max-width:700px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpi .v{font-size:24px;font-weight:700}.kpi .l{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:5px 4px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:500}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.bar{display:flex;align-items:center;gap:8px;margin:4px 0}.bar span:first-child{width:110px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar i{display:block;height:10px;background:var(--bar);border-radius:3px}.bar b{font-weight:500;color:var(--muted);font-size:12px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}svg{width:100%;height:80px}
+.err{grid-column:1/-1;color:var(--bad)}
+</style>
+</head>
+<body>
+<header><h1>Live translation analytics</h1><div class="sub" id="sub">Loading…</div></header>
+<main id="main"></main>
+<script>
+(() => {
+  const t = new URLSearchParams(location.search).get('t');
+  const main = document.getElementById('main');
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const card = (title, html, cls = '') => `<section class="card ${cls}"><h2>${esc(title)}</h2>${html}</section>`;
+  const bars = (obj) => { const e = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]); const max = Math.max(1, ...e.map((x) => x[1])); return e.length ? e.slice(0, 12).map(([k, v]) => `<div class="bar"><span>${esc(k)}</span><i style="width:${(v / max) * 100}%"></i><b>${v}</b></div>`).join('') : '<div class="sub">No data yet</div>'; };
+  const ms = (v) => v === null || v === undefined ? '—' : Math.round(v);
+  function spark(hourly) {
+    const e = Object.entries(hourly || {}).sort(); if (!e.length) return '<div class="sub">No data yet</div>';
+    const max = Math.max(1, ...e.map((x) => x[1])); const w = 300, h = 70, step = w / Math.max(1, e.length - 1);
+    const pts = e.map(([, v], i) => `${(i * step).toFixed(1)},${(h - (v / max) * (h - 6) - 3).toFixed(1)}`).join(' ');
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts}"/></svg><div class="sub">${e.length} hours · peak ${max}/h</div>`;
+  }
+  async function load() {
+    let d;
+    try { const r = await fetch('/api/dashboard?t=' + encodeURIComponent(t)); d = await r.json(); if (!r.ok) throw new Error(d.error); }
+    catch (e) { main.innerHTML = `<div class="err">${esc(e.message || e)} — run /dashboard again in Discord.</div>`; return; }
+    document.getElementById('sub').textContent = `Guild ${d.guild_id} · updated ${new Date().toLocaleTimeString()}`;
+    const day = d.day, lat = day.latency, edge = d.edge.latency_ms || {};
+    const kpi = (v, l) => `<div class="card kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+    let html = `<div class="kpis">${kpi(day.utterances, 'utterances (24 h)')}${kpi(d.week.utterances, 'utterances (7 d)')}${kpi(d.live ? '● live' : '○ idle', 'session')}${kpi(d.listeners, 'web listeners')}</div>`;
+    const row = (name, key, edgeKey) => `<tr><td>${name}</td><td class="num">${ms(lat[key]?.p50)}</td><td class="num">${ms(lat[key]?.p90)}</td><td class="num">${ms(edge[edgeKey]?.p50)}</td></tr>`;
+    html += card('Latency (ms, end of speech →)', `<table><tr><th>stage</th><th>p50</th><th>p90</th><th>edge live p50</th></tr>${row('VAD endpoint', 'vad_endpoint', 'vad_endpoint')}${row('Speech recognition', 'stt', 'stt')}${row('Translation', 'mt', 'mt')}${row('→ caption', 'end_to_caption', 'end_to_caption')}${row('→ first dub audio', 'end_to_first_audio', 'end_to_first_audio_edge')}</table>`
+      + (d.expected_latency ? `<div class="sub" style="margin-top:6px">Expected for this hardware tier (house voice): ${esc((d.expected_latency.total_house || []).join('–'))} ms</div>` : ''));
+    html += card('Activity (utterances / hour, 7 d)', spark(d.week.hourly));
+    html += card('Spoken languages (24 h)', bars(day.byLang));
+    html += card('Delivery tier (24 h)', bars(Object.fromEntries(Object.entries(day.byTier || {}).map(([k, v]) => [({ 1: 'cloned', 2: 'voice', 3: 'captions', 0: 'none' })[k] || k, v]))));
+    html += card('Quality flags (24 h)', bars(day.flags));
+    html += card('Workers', `<table><tr><th>worker</th><th>status</th><th>tier</th><th>RTT</th><th>reconnects</th></tr>${d.workers.map((w) => `<tr><td>${esc(w.name)}</td><td class="${w.status === 'ready' ? 'ok' : 'bad'}">${esc(w.status)}</td><td>${esc(w.hardware?.tier)} ${esc(w.hardware?.gpu_name || '')}</td><td class="num">${ms(w.rtt_ms)}</td><td class="num">${w.reconnects}</td></tr>`).join('')}</table>`);
+    html += card('Models / providers', `<table>${d.providers.map((p) => `<tr><td>${esc(p.stage)}</td><td>${esc(p.name)}</td><td class="${p.status === 'skipped' ? 'bad' : 'ok'}">${esc(p.status)}</td></tr>`).join('')}</table>`);
+    if (d.registry) html += card('Language coverage', `<div class="bar"><span>cloned</span><b>${d.registry.counts.tier1}</b></div><div class="bar"><span>voice</span><b>${d.registry.counts.tier2}</b></div><div class="bar"><span>captions</span><b>${d.registry.counts.tier3}</b></div><div class="bar"><span>none</span><b>${d.registry.counts.tier0}</b></div>`);
+    if (d.live) html += card('Live session', `<div>Speakers: ${esc((d.live.speakers || []).map((s) => s.name).join(', ') || '—')}</div><div>Captions: ${esc((d.live.settings?.textTargets || []).join(', '))} · dub: ${esc(d.live.settings?.dubLang || 'off')}</div><div>Dub queue: ${d.live.dub_queue} · mirrors: ${esc((d.live.mirrors || []).join(', ') || '—')}</div>`);
+    const c = d.edge.counters || {};
+    html += card('Edge counters', `<table>${Object.entries(c).sort().slice(0, 30).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`).join('')}</table>`);
+    main.innerHTML = html;
+  }
+  if (!t) { main.innerHTML = '<div class="err">Missing token — run /dashboard in Discord.</div>'; return; }
+  load(); setInterval(load, 5000);
+})();
+</script>
+</body>
+</html>

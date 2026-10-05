@@ -1,0 +1,51 @@
+# Worker configuration. Environment variables override these values
+# (see .env.example; generic form: TW__SECTION__KEY=value, e.g. TW__PIPELINE__ENDPOINT_MS=400).
+
+server:
+  host: 0.0.0.0
+  port: 7700
+  auth_token: ${WORKER_TOKEN}
+
+hardware:
+  tier: ${HARDWARE_TIER:-auto}      # auto | cpu | gpu8 | gpu24
+  device: auto
+
+policy:
+  mode: ${PIPELINE_MODE:-auto}      # auto | local | hybrid | cloud
+  commercial: ${COMMERCIAL:-false}
+  store_audio: false               # never write call audio to disk
+  hybrid_langs: [ig, yo, ha, pcm]  # in hybrid mode, prefer cloud for these (if a key exists)
+
+pipeline:
+  partials: auto                   # live partial captions (on by default on GPU)
+  incremental_dub: auto            # dub the first stable clause before the speaker finishes (GPU)
+  endpoint_ms: 500                 # silence that ends an utterance
+  endpoint_fast_ms: 250            # ...after clause-final punctuation
+  min_speech_ms: 250
+  max_utterance_s: 12
+  long_utterance_s: 6              # beyond this, split at pauses and re-detect language (code-switching)
+  lid_recheck_every: 3
+  stale_dub_s: 4.0
+
+stt:
+  model: auto                      # auto | small | medium | large-v3-turbo | large-v3 | /path
+  igbo_asr: false                  # MMS-1b-all Igbo adapter (CC-BY-NC, needs requirements-extras)
+
+mt:
+  provider: auto                   # auto (NLLB; MADLAD when commercial) | nllb | madlad
+  model: auto
+
+tts:
+  voices:                          # override Piper voices per language
+    en: en_US-lessac-medium
+  mms_tts: true                    # Yoruba/Hausa/Igbo voices (CC-BY-NC; needs requirements-extras)
+  speed_match: true
+
+clone:
+  enabled: auto                    # auto = GPU tiers only
+
+llm:
+  enabled: auto
+  base_url: ${LLM_BASE_URL:-}
+  model: ${LLM_MODEL:-}
+  api_key: ${LLM_API_KEY:-}

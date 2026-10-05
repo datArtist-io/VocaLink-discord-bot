@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Translation Listener</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6570;--line:#e3e6ea;--accent:#4f5bd5;--accent-ink:#fff;--ok:#1f8a4c;--warn:#b26b00;--chip:#eef0fb}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--panel:#171a21;--ink:#e8ebf0;--muted:#9aa3ad;--line:#262b35;--accent:#7b86ff;--accent-ink:#0f1115;--ok:#47c27c;--warn:#f0a43a;--chip:#232845}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{position:sticky;top:0;z-index:2;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h1{font-size:16px;margin:0 auto 0 0}.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block;margin-right:6px}.live .dot{background:var(--ok)}
+main{max-width:760px;margin:0 auto;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+label{font-size:13px;color:var(--muted);display:block;margin-bottom:4px}
+select,input[type=range]{width:100%}select{padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:inherit}
+button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media (max-width:560px){.row{grid-template-columns:1fr}}
+.hint{font-size:13px;color:var(--muted)}
+#speakers{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:var(--chip);border-radius:999px;padding:4px 10px;font-size:13px;cursor:pointer;border:1px solid transparent}.chip.muted{opacity:.45;text-decoration:line-through}
+#caps{display:flex;flex-direction:column;gap:8px}.cap{border-left:3px solid var(--line);padding:4px 10px}.cap.final{border-color:var(--accent)}
+.cap .who{font-weight:600;font-size:13px}.cap .src{color:var(--muted);font-size:12px;margin-left:6px}.cap .orig{color:var(--muted);font-size:13px}.cap.partial .txt{font-style:italic;color:var(--muted)}
+#notice{color:var(--warn);font-size:13px;min-height:1em}
+.meter{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}.meter>i{display:block;height:100%;width:0;background:var(--ok);transition:width .1s}
+</style>
+</head>
+<body>
+<header id="hdr"><h1><span class="dot"></span><span id="status">Connecting…</span></h1><button id="start">▶ Start audio</button></header>
+<main>
+  <div class="card">
+    <div class="row">
+      <div><label for="lang">I want to hear</label><select id="lang"></select></div>
+      <div><label for="vol">Translated voice volume</label><input id="vol" type="range" min="0" max="150" value="100"><div class="meter"><i id="lvl"></i></div></div>
+    </div>
+    <p class="hint">This page plays translations only. To hear <em>only</em> the translation, lower foreign speakers in Discord (right-click a user → <b>User Volume</b>). Tap a speaker below to mute their dubs here.</p>
+    <div id="speakers"></div>
+    <label style="margin-top:10px"><input type="checkbox" id="showOrig" checked> Show original text</label>
+  </div>
+  <div id="notice"></div>
+  <div class="card"><div id="caps"><p class="hint">Captions appear here when someone speaks.</p></div></div>
+</main>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const token = q.get('t');
+  const $ = (id) => document.getElementById(id);
+  let ctx = null, gain = null, analyser = null, ws = null, lang = q.get('lang') || '';
+  const muted = new Set(); const dubUser = new Map(); const names = new Map();
+  let playhead = 0; const JITTER = 0.08;
+  const status = (txt, live) => { $('status').textContent = txt; $('hdr').classList.toggle('live', !!live); };
+
+  async function loadLangs() {
+    try {
+      const r = await fetch('/api/languages?t=' + encodeURIComponent(token));
+      if (!r.ok) throw new Error((await r.json()).error || r.status);
+      const { languages } = await r.json();
+      const sel = $('lang'); sel.innerHTML = '';
+      const tierLabel = { 1: 'cloned voice', 2: 'voice', 3: 'captions only', 0: 'unavailable' };
+      Object.entries(languages).sort((a, b) => a[1].name.localeCompare(b[1].name)).forEach(([code, l]) => {
+        if (l.tier === 0) return;
+        const o = document.createElement('option'); o.value = code; o.textContent = `${l.name} — ${tierLabel[l.tier]}`; sel.appendChild(o);
+      });
+      if (lang) sel.value = lang;
+    } catch (e) { status('Link invalid or expired — run /listen again in Discord'); throw e; }
+  }
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => status('Connected', true);
+    ws.onclose = () => { status('Disconnected — retrying…'); setTimeout(connect, 2000); };
+    ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
+  }
+
+  function onJson(m) {
+    if (m.type === 'status') { status(m.live ? `Live · ${m.lang.toUpperCase()}` : 'Waiting for a translation session…', m.live); if (m.lang) { lang = m.lang; $('lang').value = m.lang; } }
+    else if (m.type === 'caption') caption(m);
+    else if (m.type === 'dub_start') { dubUser.set(m.dub_id, m.user_id); }
+    else if (m.type === 'dub_end') { setTimeout(() => dubUser.delete(m.dub_id), 5000); }
+    else if (m.type === 'notice') { $('notice').textContent = m.message; }
+  }
+
+  function speakerChip(id, name) {
+    if (names.has(id)) return; names.set(id, name);
+    const c = document.createElement('span'); c.className = 'chip'; c.textContent = name;
+    c.onclick = () => { muted.has(id) ? muted.delete(id) : muted.add(id); c.classList.toggle('muted', muted.has(id)); };
+    $('speakers').appendChild(c);
+  }
+
+  function caption(m) {
+    speakerChip(m.user_id, m.name);
+    const box = $('caps'); if (box.firstElementChild?.classList.contains('hint')) box.innerHTML = '';
+    let el = document.getElementById('c-' + m.key);
+    if (!el) { el = document.createElement('div'); el.id = 'c-' + m.key; el.className = 'cap'; box.prepend(el); }
+    el.className = 'cap ' + (m.final ? 'final' : 'partial');
+    const txt = m.text ?? (m.src === lang ? m.original : '…');
+    el.innerHTML = '';
+    const who = document.createElement('div'); who.className = 'who'; who.textContent = m.name;
+    const src = document.createElement('span'); src.className = 'src'; src.textContent = m.src.toUpperCase(); who.appendChild(src);
+    const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt;
+    el.append(who, t);
+    if ($('showOrig').checked && m.src !== lang) { const o = document.createElement('div'); o.className = 'orig'; o.textContent = m.original; el.appendChild(o); }
+    while (box.children.length > 60) box.lastElementChild.remove();
+  }
+
+  function onAudio(buf) {
+    if (!ctx) return;
+    const dv = new DataView(buf); const dubId = dv.getUint32(0);
+    if (muted.has(dubUser.get(dubId))) return;
+    const pcm = new Int16Array(buf, 8); const f = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+    const b = ctx.createBuffer(1, f.length, 24000); b.copyToChannel(f, 0);
+    const s = ctx.createBufferSource(); s.buffer = b; s.connect(gain);
+    const now = ctx.currentTime; if (playhead < now + 0.01) playhead = now + JITTER;
+    s.start(playhead); playhead += b.duration;
+  }
+
+  function meter() {
+    if (analyser) { const a = new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(a); let m = 0; for (const v of a) m = Math.max(m, Math.abs(v - 128)); $('lvl').style.width = Math.min(100, m * 1.6) + '%'; }
+    requestAnimationFrame(meter);
+  }
+
+  $('start').onclick = async () => {
+    if (!ctx) { ctx = new AudioContext(); gain = ctx.createGain(); analyser = ctx.createAnalyser(); gain.connect(analyser); analyser.connect(ctx.destination); gain.gain.value = $('vol').value / 100; meter(); }
+    await ctx.resume(); $('start').textContent = '🔊 Audio on'; $('start').classList.add('ghost');
+  };
+  $('vol').oninput = () => { if (gain) gain.gain.value = $('vol').value / 100; };
+  $('lang').onchange = () => { lang = $('lang').value; ws?.send(JSON.stringify({ type: 'set_lang', lang })); };
+  if (!token) { status('Missing link token — run /listen in Discord'); return; }
+  loadLangs().then(connect).catch(() => {});
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+# Discord live voice translation bot
+#
+#   cp .env.example .env            # fill in DISCORD_TOKEN, DISCORD_CLIENT_ID, WORKER_TOKEN, PUBLIC_URL
+#   docker compose --profile init-cpu run --rm models-init     # one-time model download (CPU plan)
+#   docker compose --profile cpu up -d                     # CPU server
+#   # or, on an NVIDIA GPU host (needs nvidia-container-toolkit):
+#   docker compose --profile init-gpu run --rm models-init-gpu
+#   docker compose --profile gpu up -d
+#   # optional local LLM for natural/cultural modes + summaries:
+#   docker compose --profile gpu --profile llm up -d && docker compose exec ollama ollama pull llama3.1:8b
+name: discord-voice-translator
+
+x-worker-common: &worker-common
+  env_file: .env
+  environment:
+    MODELS_DIR: /models
+    DATA_DIR: /data
+    WORKER_CONFIG: /config/config.yaml
+  volumes:
+    - models:/models
+    - workerdata:/data
+    - ./config:/config:ro
+  restart: unless-stopped
+  expose: ["7700", "7701"]
+
+services:
+  worker:
+    <<: *worker-common
+    profiles: ["cpu"]
+    build: { context: ./worker, dockerfile: Dockerfile }
+    networks: { default: { aliases: [worker] } }
+
+  worker-gpu:
+    <<: *worker-common
+    profiles: ["gpu"]
+    build: { context: ./worker, dockerfile: Dockerfile.gpu }
+    networks: { default: { aliases: [worker] } }
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  models-init:
+    <<: *worker-common
+    profiles: ["init-cpu"]
+    build: { context: ./worker, dockerfile: Dockerfile }
+    restart: "no"
+    command: ["python", "scripts/download_models.py", "--tier", "cpu"]
+
+  models-init-gpu:
+    <<: *worker-common
+    profiles: ["init-gpu"]
+    build: { context: ./worker, dockerfile: Dockerfile.gpu }
+    restart: "no"
+    command: ["python", "scripts/download_models.py", "--tier", "auto", "--with-clone", "--with-mms"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  edge:
+    build: { context: ./edge }
+    env_file: .env
+    environment:
+      WORKER_URLS: ${WORKER_URLS:-worker:7700}
+      DB_PATH: /data/edge.sqlite
+      WEB_PORT: 8080
+    ports: ["${WEB_BIND:-127.0.0.1}:8080:8080"]   # put HTTPS (Caddy/nginx) in front; see docs/DEPLOY.md
+    volumes: [edgedata:/data]
+    restart: unless-stopped
+
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    volumes: [ollama:/root/.ollama]
+    restart: unless-stopped
+    expose: ["11434"]
+
+volumes:
+  models:
+  workerdata:
+  edgedata:
+  ollama:

@@ -1,0 +1,13 @@
+# Core worker runtime (CPU and GPU). Licences: see docs/LICENSES.md
+numpy>=1.26,<3
+scipy>=1.11
+PyYAML>=6.0
+psutil>=5.9
+cryptography>=42
+httpx>=0.27
+onnxruntime>=1.18          # Silero VAD (CPU is fine for VAD)
+faster-whisper>=1.1.1      # STT + language ID (MIT)
+ctranslate2>=4.5.0         # needs CUDA 12 + cuDNN 9 on GPU
+sentencepiece>=0.2.0
+huggingface_hub>=0.24
+piper-tts>=1.3.0           # GPL-3.0 engine, per-voice licences

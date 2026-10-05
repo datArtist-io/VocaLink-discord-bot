@@ -1,0 +1,5 @@
+# Optional: Meta MMS TTS (Yoruba/Hausa/Igbo voices) + MMS ASR (Igbo) + SeamlessM4T.
+# All CC-BY-NC 4.0 (non-commercial). Refused automatically when COMMERCIAL=true.
+torch>=2.3
+transformers>=4.44
+uroman>=1.3                # romanisation for non-Latin-script MMS voices

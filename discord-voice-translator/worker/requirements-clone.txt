@@ -1,0 +1,3 @@
+# Optional: zero-shot voice cloning (GPU tiers). Chatterbox is MIT-licensed;
+# its output carries Resemble AI's Perth watermark. Pulls a pinned torch.
+chatterbox-tts>=0.1.4

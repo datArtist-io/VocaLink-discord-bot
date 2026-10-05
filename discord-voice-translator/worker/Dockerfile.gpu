@@ -1,0 +1,30 @@
+# NVIDIA GPU worker image. CTranslate2 >= 4.5 needs CUDA 12 + cuDNN 9.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
+    MODELS_DIR=/models DATA_DIR=/data HF_HOME=/models/hf
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl ca-certificates libgomp1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -u 10001 worker \
+ && python3 -m venv /venv
+ENV PATH=/venv/bin:$PATH
+
+WORKDIR /app
+COPY requirements.txt requirements-extras.txt requirements-clone.txt ./
+ARG WITH_EXTRAS=1
+ARG WITH_CLONE=1
+RUN pip install --upgrade pip \
+ && pip install -r requirements.txt \
+ && if [ "$WITH_CLONE" = "1" ]; then pip install -r requirements-clone.txt; fi \
+ && if [ "$WITH_EXTRAS" = "1" ]; then pip install -r requirements-extras.txt; fi
+
+COPY translator_worker ./translator_worker
+COPY scripts ./scripts
+RUN mkdir -p /models /data && chown -R worker /models /data
+USER worker
+
+EXPOSE 7700 7701
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s CMD curl -fs http://127.0.0.1:7701/ >/dev/null || exit 1
+CMD ["python", "-m", "translator_worker"]

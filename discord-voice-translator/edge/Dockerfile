@@ -4,7 +4,7 @@ WORKDIR /app
 # toolchain only for building @discordjs/opus if no prebuilt binary matches
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi
 COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src

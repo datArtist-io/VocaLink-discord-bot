@@ -1,6 +1,7 @@
 # Discord voice edge (TypeScript). Node >= 22.12 is required by @discordjs/voice 0.19.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+ENV NPM_CONFIG_LEGACY_PEER_DEPS=true
 # toolchain only for building @discordjs/opus if no prebuilt binary matches
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
@@ -8,7 +9,7 @@ RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm instal
 COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev --legacy-peer-deps
 
 FROM node:22-bookworm-slim
 ENV NODE_ENV=production

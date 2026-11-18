@@ -6,7 +6,12 @@ import { CloudWorker } from '../src/worker/CloudWorker.js';
 
 // Tokens as Soniox stt-rt-v6 sends them (one-way translation lanes), for a Taglish sentence:
 // "Pare, sandali lang ha, kasi yung internet ko is so slow today,"
-const tok = (text: string, language: string, translation_status: string) => ({ text, language, translation_status, is_final: true });
+// every original word gets a time (ms from the lane's start); translations don't carry times
+let clock = 0;
+const tok = (text: string, language: string, translation_status: string) =>
+  translation_status === 'translation'
+    ? { text, language, translation_status, is_final: true }
+    : { text, language, translation_status, is_final: true, start_ms: (clock += 10), end_ms: (clock += 300) };
 const END = { text: '<end>', is_final: true, translation_status: 'none' };
 const LANE_TOKENS: Record<string, object[][]> = {
   en: [
@@ -44,9 +49,17 @@ function run(langs: string[], channelDub: string[], audio = channelDub) {
   w.sendJson({ type: 'stream_open', sid: 7, guild_id: 'g', user_id: 'u', name: 'n', speak_lang: 'auto' });
   const s = (w as any).streams.get(7);
   (w as any).syncLanes(s);
+  for (const l of s.lanes.values()) l.t0 = 100_000; // all lanes heard the same audio from the same moment
   // feed every lane; secondary lanes first so the primary's final sees their text
   const order = [...s.lanes.keys()].reverse();
-  for (const k of order) for (const b of LANE_TOKENS[k] ?? []) (w as any).onSoniox(s, s.lanes.get(k), { tokens: b });
+  for (const k of order) {
+    // each language heard the same audio: its words are timed from the same start
+    let t = 0;
+    for (const b of LANE_TOKENS[k] ?? []) {
+      const timed = (b as any[]).map((x) => ('start_ms' in x ? { ...x, start_ms: (t += 10), end_ms: (t += 300) } : x));
+      (w as any).onSoniox(s, s.lanes.get(k), { tokens: timed });
+    }
+  }
   w.stop();
   return { events, spoken, lanes: [...s.lanes.keys()] };
 }
@@ -130,4 +143,32 @@ test('ElevenLabs requests never exceed the plan concurrency; extra ones queue, n
   await Promise.all(jobs);
   assert.equal(peak, 2);
   assert.equal(done, 7);
+});
+
+test('languages are matched to the right sentence by time, even when streams split sentences differently', () => {
+  const w = new CloudWorker({ sonioxKey: async () => 'x', elevenKey: 'x' });
+  const events: any[] = [];
+  w.on('event', (e) => events.push(e));
+  (w as any).speak = () => {};
+  w.start();
+  w.sendJson({ type: 'guild_config', guild_id: 'g', text_targets: ['en', 'fr'], audio_targets: [], channel_dub_langs: [], expected_langs: null });
+  w.sendJson({ type: 'stream_open', sid: 3, guild_id: 'g', user_id: 'u', name: 'n', speak_lang: 'auto' });
+  const s = (w as any).streams.get(3);
+  (w as any).syncLanes(s);
+  for (const l of s.lanes.values()) l.t0 = 50_000;
+  const o = (text: string, a: number, b: number) => ({ text, language: 'tl', translation_status: 'original', is_final: true, start_ms: a, end_ms: b });
+  const fr = (text: string) => ({ text, language: 'fr', translation_status: 'translation', is_final: true });
+  const en = (text: string) => ({ text, language: 'en', translation_status: 'translation', is_final: true });
+  const E = { text: '<end>', is_final: true };
+  // French stream: hears a stray "Mm-hmm" as its own sentence first (the screenshot's bug)
+  const feed = (k: string, toks: object[]) => (w as any).onSoniox(s, s.lanes.get(k), { tokens: toks });
+  feed('fr', [o('Mm-hmm.', 0, 400), fr('Mm-hmm.'), E]);
+  feed('fr', [o('Ako si Josiah.', 1000, 2000), fr("Je m'appelle Josiah."), E]);
+  // English (primary) stream: did not split off "Mm-hmm"
+  feed('en', [o('Ako si Josiah.', 1000, 2000), en('My name is Josiah.'), E]);
+  w.stop();
+  const fin = events.find((e) => e.type === 'final');
+  assert.equal(fin.text, 'Ako si Josiah.');
+  assert.equal(fin.translations.en.text, 'My name is Josiah.');
+  assert.equal(fin.translations.fr.text, "Je m'appelle Josiah."); // not "Mm-hmm." (the old sentence-counting bug)
 });

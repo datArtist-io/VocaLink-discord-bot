@@ -66,6 +66,8 @@ interface UttState {
   endedAt: number;
   statTs?: number;
   firstAudioLogged?: boolean;
+  absStart?: number;
+  absEnd?: number;
 }
 
 export interface WorkerSource extends EventEmitter {
@@ -467,11 +469,20 @@ export class GuildSession extends EventEmitter {
         case 'partial_translation':
           return this.onPartialTranslation(e as unknown as PartialTranslationEvent);
         case 'final_translation': {
-          // a server language finished a little after the caption was finalised: fill it in
-          const u = this.utts.get(this.uttKey(Number(e.sid), Number(e.utt_id)));
-          if (u && typeof e.lang === 'string' && typeof e.text === 'string' && !u.translations[e.lang]) {
-            u.translations = { ...u.translations, [e.lang]: e.text };
-            this.render(u);
+          // another language finished a sentence: attach it to the caption spoken at the same time
+          if (typeof e.lang !== 'string' || typeof e.text !== 'string') return;
+          const prefix = `${Number(e.sid)}:`;
+          const s0 = Number(e.abs_start), s1 = Number(e.abs_end);
+          let best: UttState | null = null;
+          let bestOv = 0;
+          for (const [k, u] of this.utts) {
+            if (!k.startsWith(prefix) || !u.final || u.absStart === undefined || u.translations[e.lang]) continue;
+            const ov = Math.min(s1, u.absEnd!) - Math.max(s0, u.absStart);
+            if (ov > bestOv) { bestOv = ov; best = u; }
+          }
+          if (best) {
+            best.translations = { ...best.translations, [e.lang]: e.text };
+            this.render(best);
           }
           return;
         }
@@ -540,6 +551,8 @@ export class GuildSession extends EventEmitter {
     const sp = this.speakers.get(userId);
     const u: UttState = {
       key, userId, name, srcLang: e.lang, original: e.text, translations, final: true, flags, notes,
+      absStart: typeof (e as unknown as { abs_start?: number }).abs_start === 'number' ? (e as unknown as { abs_start: number }).abs_start : undefined,
+      absEnd: typeof (e as unknown as { abs_end?: number }).abs_end === 'number' ? (e as unknown as { abs_end: number }).abs_end : undefined,
       prob: e.lang_prob, tiers: e.tiers, endedAt: sp?.speechEndAt ?? performance.now(),
     };
     this.utts.set(key, u);

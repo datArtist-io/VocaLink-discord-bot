@@ -99,6 +99,9 @@ interface Utt {
   translatedInto: boolean; // part of this utterance needed translating into the target
   lastWasTr: boolean;
   firstAt: number;
+  /** wall-clock span of the spoken words (ms, performance.now() base), to match languages up */
+  absStart: number;
+  absEnd: number;
 }
 
 /**
@@ -120,7 +123,10 @@ interface Lane {
   backoffMs: number;
   utt: Utt;
   nextUtt: number;
-  completed: Map<number, string>; // utt id -> final target text (secondary lanes)
+  /** finished sentences of a secondary lane, with when they were spoken */
+  completed: { text: string; start: number; end: number; used: boolean }[];
+  /** wall-clock time of this lane's first audio frame (Soniox times are relative to it) */
+  t0: number;
 }
 
 interface Stream {
@@ -263,7 +269,8 @@ export class CloudWorker extends EventEmitter {
     s.lastAudioAt = performance.now();
     this.syncLanes(s);
     for (const lane of s.lanes.values()) {
-      if (!lane.ws && s.lastAudioAt >= lane.retryAt) this.openLane(s, lane);
+      if (!lane.ws && s.lastAudioAt >= lane.retryAt) { this.openLane(s, lane); lane.t0 = 0; }
+      if (!lane.t0) lane.t0 = s.lastAudioAt - pcm.length / 32; // this frame is the lane's time zero (16 kHz s16)
       if (lane.wsOpen && lane.ws?.readyState === WebSocket.OPEN) {
         lane.ws.send(pcm);
         continue;
@@ -372,7 +379,7 @@ export class CloudWorker extends EventEmitter {
       if (!lane) {
         lane = {
           target: k === '-' ? null : k, primary: false, ws: null, wsOpen: false, sig: hintsSig, pending: [], pendingBytes: 0,
-          keepalive: null, phraseTimer: null, retryAt: 0, backoffMs: 500, utt: newUtt(1), nextUtt: 2, completed: new Map(),
+          keepalive: null, phraseTimer: null, retryAt: 0, backoffMs: 500, utt: newUtt(1), nextUtt: 2, completed: [], t0: 0,
         };
         s.lanes.set(k, lane);
       } else if (lane.ws && lane.sig !== hintsSig) {
@@ -512,6 +519,10 @@ export class CloudWorker extends EventEmitter {
       }
       if (!u.firstAt) u.firstAt = performance.now();
       if (!isTr) {
+        if (typeof t.start_ms === 'number' && typeof t.end_ms === 'number' && lane.t0) {
+          if (!u.absStart) u.absStart = lane.t0 + t.start_ms;
+          u.absEnd = Math.max(u.absEnd, lane.t0 + t.end_ms);
+        }
         u.original += t.text;
         if (t.language && t.text.trim()) u.langCount.set(t.language, (u.langCount.get(t.language) ?? 0) + 1);
         if (typeof t.confidence === 'number') {
@@ -545,7 +556,7 @@ export class CloudWorker extends EventEmitter {
         this.emit('event', { type: 'partial', sid: s.sid, utt_id: u.id, lang: topLang(u) ?? '', committed, tentative: tentative.trim() });
       }
     }
-    if (lane.target && (gotFinal || tentativeTr)) {
+    if (lane.primary && lane.target && (gotFinal || tentativeTr)) {
       const txt = (u.text + tentativeTr).trim();
       const src = topLang(u);
       if (txt && lane.target !== src && primary) {
@@ -591,12 +602,12 @@ export class CloudWorker extends EventEmitter {
     const u = lane.utt;
     lane.utt = newUtt(lane.nextUtt++);
     if (!lane.primary) {
-      // a secondary language finished this sentence: remember it and update the caption
-      if (lane.target) {
-        const t = u.text.trim();
-        lane.completed.set(u.id, t);
-        if (lane.completed.size > 20) lane.completed.delete(lane.completed.keys().next().value!);
-        if (t) this.emit('event', { type: 'final_translation', sid: s.sid, utt_id: u.id, lang: lane.target, text: t });
+      // A secondary language finished a sentence. Lanes can split sentences differently, so it is
+      // matched to the caption by WHEN it was spoken (overlap), never by counting sentences.
+      if (lane.target && u.text.trim()) {
+        lane.completed.push({ text: u.text.trim(), start: u.absStart, end: u.absEnd, used: false });
+        if (lane.completed.length > 20) lane.completed.shift();
+        this.emit('event', { type: 'final_translation', sid: s.sid, lang: lane.target, text: u.text.trim(), abs_start: u.absStart, abs_end: u.absEnd });
       }
       return;
     }
@@ -610,7 +621,12 @@ export class CloudWorker extends EventEmitter {
     const tiers: Record<string, number> = {};
     for (const [k, l] of s.lanes) {
       if (!l.target) continue;
-      const t = l === lane ? u.text.trim() : (l.completed.get(u.id) ?? (l.utt.id === u.id ? l.utt.text.trim() : ''));
+      let t = l === lane ? u.text.trim() : '';
+      if (l !== lane) {
+        // already finished in that language? take the sentence that overlaps this one in time
+        const hit = bestOverlap(l.completed, u.absStart, u.absEnd);
+        if (hit) { hit.used = true; t = hit.text; }
+      }
       translations[k] = { text: t || (k === lang ? text : null), provider: 'soniox', mode: 'literal', note: '' };
       tiers[k] = audio.has(k) && ELEVEN_LANGS[k] ? 2 : 3;
     }
@@ -620,7 +636,7 @@ export class CloudWorker extends EventEmitter {
       type: 'final', sid: s.sid, utt_id: u.id, user_id: s.userId, lang, lang_prob: 1, lid_reason: 'soniox',
       segments: [], text, confidence, flags: confidence < 0.5 ? ['low_confidence'] : [], translations, tiers,
       stt_provider: 'soniox', duration_s: sinceFirst / 1000, endpoint_reason: 'soniox',
-      latency: {},
+      abs_start: u.absStart, abs_end: u.absEnd, latency: {},
     });
   }
 
@@ -657,6 +673,8 @@ export class CloudWorker extends EventEmitter {
     if (have) return have;
     const hz = s.pitch.hz;
     const pool = hz !== null && hz < PITCH_SPLIT_HZ ? this.o.voices.low : this.o.voices.high;
+    // pitch not measured yet (first phrase): use a voice for now, but don't keep it for the call
+    const keep = hz !== null;
     const other = pool === this.o.voices.low ? this.o.voices.high : this.o.voices.low;
     const used = new Set(g.values());
     // stable per user (same person, same voice next time), but skip voices taken in this call
@@ -665,7 +683,7 @@ export class CloudWorker extends EventEmitter {
     for (let k = 0; k < pool.length && !pick; k++) if (!used.has(pool[(start + k) % pool.length]!)) pick = pool[(start + k) % pool.length];
     if (!pick && hz === null) pick = other.find((v) => !used.has(v)); // pitch unknown: any free voice
     pick ??= pool[start]!;
-    g.set(s.userId, pick);
+    if (keep) g.set(s.userId, pick);
     return pick;
   }
 
@@ -842,7 +860,7 @@ interface SonioxToken {
 }
 
 function newUtt(id: number): Utt {
-  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, lastWasTr: false, firstAt: 0 };
+  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, lastWasTr: false, firstAt: 0, absStart: 0, absEnd: 0 };
 }
 
 function topLang(u: Utt): string | null {
@@ -863,4 +881,16 @@ export function joinPiece(prev: string, next: string, boundary: boolean): string
   if (!boundary || !prev || !next) return next;
   if (/\s$/.test(prev) || /^[\s.,!?;:)\]}'’"…-]/.test(next)) return next;
   return ' ' + next;
+}
+
+/** The finished sentence that overlaps [start, end] the most (null if none overlap). */
+export function bestOverlap<T extends { start: number; end: number; used?: boolean }>(items: T[], start: number, end: number): T | null {
+  let best: T | null = null;
+  let bestOv = 0;
+  for (const it of items) {
+    if (it.used) continue;
+    const ov = Math.min(end, it.end) - Math.max(start, it.start);
+    if (ov > bestOv) { bestOv = ov; best = it; }
+  }
+  return best;
 }

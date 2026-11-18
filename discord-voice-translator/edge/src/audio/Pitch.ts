@@ -16,9 +16,16 @@ export class PitchTracker {
 
   constructor(private readonly maxFrames = 150) {}
 
-  /** Feed one PCM16 frame (after gain control). */
-  push(pcm: Buffer): void {
+  private prev: Buffer | null = null;
+
+  /** Feed one PCM16 frame (after gain control). Frames are 20 ms; analysis uses 40 ms windows. */
+  push(frame: Buffer): void {
     if (this.frames >= this.maxFrames) return;
+    // a 20 ms frame (320 samples) is too short to measure a deep voice (period up to 229
+    // samples needs ~2 periods), so analyse the previous + current frame together
+    const pcm = this.prev ? Buffer.concat([this.prev, frame]) : null;
+    this.prev = Buffer.from(frame);
+    if (!pcm) return;
     const n = pcm.length >> 1;
     if (n < MAX_LAG * 2) return;
     const x = new Float32Array(n);

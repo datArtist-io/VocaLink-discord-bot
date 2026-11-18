@@ -147,17 +147,20 @@ export class DiscordVoiceLink extends EventEmitter implements VoiceLinkLike {
     } catch {
       /* already destroyed */
     }
+    let ok = false;
     for (let attempt = 0; attempt < 5 && !this.destroyed; attempt++) {
       try {
         await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
         await this.connect();
         for (const u of users) this.subscribe(u);
+        ok = true;
         break;
       } catch (e) {
         this.o.log.warn('rejoin attempt failed', { attempt, err: (e as Error).message });
       }
     }
     this.rejoining = false;
+    if (!ok && !this.destroyed) this.emit('lost'); // couldn't get back in: the session should end
   }
 
   subscribe(userId: string): void {

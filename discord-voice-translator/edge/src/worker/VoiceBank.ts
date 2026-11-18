@@ -59,11 +59,16 @@ export class VoiceBank {
   setPref(userId: string, pref: string | null): void {
     this.store.setKv(`voicepref:${userId}`, pref ?? '');
     if (pref === 'clone') this.store.setKv(`voiceconsent:${userId}`, String(Date.now()));
-    else this.forget(userId); // no longer consenting: drop any speech held for learning
+    else this.withdraw(userId); // no longer consenting: drop held speech, cancel a voice being created
   }
 
-  /** Drop speech held for learning (never kept beyond the call or after a change of mind). */
+  /** Left the call: drop speech held for learning (never kept beyond the call). Consent is unchanged. */
   forget(userId: string): void {
+    this.samples.delete(userId);
+  }
+
+  /** Withdrawn (another voice chosen, deleted, opted out): drop samples and cancel any voice being created. */
+  private withdraw(userId: string): void {
     this.samples.delete(userId);
     this.gen.set(userId, (this.gen.get(userId) ?? 0) + 1);
   }
@@ -146,7 +151,7 @@ export class VoiceBank {
 
   /** Delete the person's cloned voice everywhere and stop learning. */
   async remove(userId: string): Promise<void> {
-    this.forget(userId);
+    this.withdraw(userId);
     const id = this.cloneId(userId);
     this.store.setKv(`clone:${userId}`, '');
     this.store.setKv(`cloneerr:${userId}`, '');

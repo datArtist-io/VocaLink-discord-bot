@@ -196,6 +196,8 @@ export class TranslatorBot {
     if (dubOpt) {
       const dub = dubOpt === 'off' ? null : normalizeLang(dubOpt);
       if (dubOpt !== 'off' && !dub) throw new Error(`Unknown language "${dubOpt}"`);
+      const langs = this.d.store.getSettings(guild.id).textTargets;
+      if (dub && dub !== 'auto' && !langs.includes(dub)) throw new Error(`${languageName(dub)} isn't one of this server's languages. Add it in /setup first.`);
       this.d.store.updateSettings(guild.id, { dubLang: dub });
     }
     const settings = this.d.store.getSettings(guild.id);
@@ -225,6 +227,7 @@ export class TranslatorBot {
       if (captionsChannel.id !== textChannel.id && 'delete' in captionsChannel) await (captionsChannel as { delete(): Promise<unknown> }).delete().catch(() => {});
       throw new Error(`Could not join ${vc.name}: ${(e as Error).message}`);
     }
+    link.on('lost', () => void this.stop(guild.id, 'lost the voice connection').catch(() => {}));
     link.on('dave', (info: Record<string, unknown>) => {
       if (info.event === 'rejoin') this.d.metrics.inc('dave_rejoins');
       if (info.event === 'health') this.d.metrics.gauge(`dave_stream_errors_${guild.id}`, Number(info.streamErrors ?? 0));
@@ -357,7 +360,7 @@ export class TranslatorBot {
     } catch (e) {
       this.d.log.warn('stopping the session hit an error', { err: e });
     } finally {
-      await a.captionsChannel.send({ content: `⏹️ Translation ended (${reason}).`, allowedMentions: { parse: [] } }).catch(() => {});
+      if (this.d.store.getSettings(guildId).captions !== false) await a.captionsChannel.send({ content: `⏹️ Translation ended (${reason}).`, allowedMentions: { parse: [] } }).catch(() => {});
       const guild = this.d.client.guilds.cache.get(guildId);
       if (guild && this.d.mirrors) await this.d.mirrors.cleanup(guild).catch(() => {});
     }
@@ -893,7 +896,7 @@ export class TranslatorBot {
       void this.stop(n.guild.id, 'bot was disconnected').catch((e) => this.d.log.warn('stop failed', { err: e }));
       return;
     }
-    if (o.channelId === a.link.channelId && n.channelId !== a.link.channelId) a.session.dropUser(n.id);
+    if (o.channelId === a.link.channelId && n.channelId !== a.link.channelId) a.session.dropUser(n.id, { keepLast: true });
     const ch = n.guild.channels.cache.get(a.link.channelId);
     const humans = ch && 'members' in ch ? (ch.members as Map<string, GuildMember>) : null;
     const count = humans ? [...humans.values()].filter((m) => !m.user.bot).length : 1;

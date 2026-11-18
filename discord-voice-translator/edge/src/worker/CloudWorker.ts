@@ -559,7 +559,7 @@ export class CloudWorker extends EventEmitter {
       if (!u.firstAt) u.firstAt = performance.now();
       if (!isTr) {
         if (typeof t.start_ms === 'number' && typeof t.end_ms === 'number' && lane.t0 >= 0) {
-          if (!u.absStart) u.absStart = lane.t0 + t.start_ms;
+          if (u.absStart < 0) u.absStart = lane.t0 + t.start_ms;
           u.absEnd = Math.max(u.absEnd, lane.t0 + t.end_ms);
         }
         u.original += t.text;
@@ -824,6 +824,7 @@ export class CloudWorker extends EventEmitter {
    */
   private async fetchWithFirstByteTimeout(url: string, body: string, signal: AbortSignal): Promise<{ res: Response; ctrl: AbortController }> {
     for (let attempt = 0; ; attempt++) {
+      signal.throwIfAborted(); // cancelled while waiting to retry
       const ctrl = new AbortController();
       const onAbort = () => ctrl.abort();
       signal.addEventListener('abort', onAbort, { once: true });
@@ -913,7 +914,7 @@ interface SonioxToken {
 }
 
 function newUtt(id: number): Utt {
-  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, lastWasTr: false, firstAt: 0, absStart: 0, absEnd: 0 };
+  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, lastWasTr: false, firstAt: 0, absStart: -1, absEnd: -1 };
 }
 
 function topLang(u: Utt): string | null {

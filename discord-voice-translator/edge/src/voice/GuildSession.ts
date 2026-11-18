@@ -105,6 +105,8 @@ export class GuildSession extends EventEmitter {
   readonly mirrors = new Map<string, { link: VoiceLinkLike; sched: PlayoutScheduler }>();
   private speakers = new Map<string, Speaker>();
   private sidToUser = new Map<number, string>();
+  /** names of people who just left, while their last sentence finishes */
+  private lastNames = new Map<number, string>();
   private dubs = new Map<number, DubRoute>();
   private utts = new Map<string, UttState>();
   private webLangs: string[] = [];
@@ -213,7 +215,8 @@ export class GuildSession extends EventEmitter {
   }
 
   /** Forget a user immediately (e.g. /optout during a session). */
-  dropUser(userId: string): void {
+  /** `keepLast`: they left the channel, so their last sentence is still captioned (never for opt-out or bots). */
+  dropUser(userId: string, opts: { keepLast?: boolean } = {}): void {
     const sp = this.speakers.get(userId);
     if (!sp) return;
     this.d.voice.unsubscribe(userId);
@@ -221,9 +224,14 @@ export class GuildSession extends EventEmitter {
     this.client.dropStream(sp.sid);
     sp.decoder.destroy();
     this.speakers.delete(userId);
-    // their last sentence is still being finished: keep the id -> person mapping for a few seconds
     const sid = sp.sid;
-    setTimeout(() => { if (!this.speakers.get(userId) || this.speakers.get(userId)!.sid !== sid) this.sidToUser.delete(sid); }, 6_000).unref();
+    if (opts.keepLast) {
+      // their last sentence is still being finished: keep who said it for a few seconds
+      this.lastNames.set(sid, sp.name);
+      setTimeout(() => { this.sidToUser.delete(sid); this.lastNames.delete(sid); }, 6_000).unref();
+    } else {
+      this.sidToUser.delete(sid);
+    }
     this.main.humanSpeaking(userId, false);
     this.d.hub?.speaking(this.guildId, userId, false);
   }
@@ -526,7 +534,7 @@ export class GuildSession extends EventEmitter {
 
   private nameOf(sid: number): { userId: string; name: string } {
     const userId = this.sidToUser.get(sid) ?? '?';
-    return { userId, name: this.speakers.get(userId)?.name ?? 'speaker' };
+    return { userId, name: this.speakers.get(userId)?.name ?? this.lastNames.get(sid) ?? 'speaker' };
   }
 
   private onPartial(e: PartialEvent): void {
@@ -576,7 +584,7 @@ export class GuildSession extends EventEmitter {
     // tier notices (once per language per session)
     for (const [lang, tier] of Object.entries(e.tiers)) {
       const k = `${lang}:${tier}`;
-      if (tier === 1 || tier === 2 || this.tierNoticeShown.has(k)) continue;
+      if (tier !== 0 || this.tierNoticeShown.has(k)) continue; // only tell people when a language can't be translated
       this.tierNoticeShown.add(k);
       const reasons = this.client.info?.languages?.[lang]?.reasons ?? [];
       if (this.settings.captions !== false) this.d.captions?.notice(formatTierNotice(lang, tier, reasons));

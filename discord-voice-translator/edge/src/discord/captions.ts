@@ -32,28 +32,24 @@ export interface CaptionData {
   voiceTier?: Record<string, number>;
 }
 
+import { flag } from './setupPanel.js';
+
 const MAX_LEN = 1900;
 
 export function escapeMd(s: string): string {
   return s.replace(/([\\*_~`|>])/g, '\\$1').replace(/@(everyone|here)/g, '@\u200b$1').replace(/<@/g, '<@\u200b');
 }
 
-const TIER_ICON: Record<number, string> = { 1: '🗣️', 2: '🔊', 3: '💬', 0: '⛔' };
 
 export function formatCaption(c: CaptionData): string {
-  const head = `**${escapeMd(c.name)}** · ${c.srcLang.toUpperCase()}${c.prob ? ` ${Math.round(c.prob * 100)}%` : ''}`;
-  const lines = [head];
-  if (c.partial) {
-    lines.push(`*${escapeMd(c.original)}* ✍️`);
-  } else {
-    lines.push(`> ${escapeMd(c.original)}`);
-  }
+  // 🇵🇭 **Maria**  (original, quoted)  then one line per language with its flag
+  const lines = [`${flag(c.srcLang)} **${escapeMd(c.name)}**`];
+  lines.push(c.partial ? `-# ${escapeMd(c.original)} …` : `> ${escapeMd(c.original)}`);
   for (const [lang, text] of Object.entries(c.translations)) {
     if (!text) continue;
-    const icon = c.voiceTier?.[lang] !== undefined ? ` ${TIER_ICON[c.voiceTier[lang]!] ?? ''}` : '';
-    lines.push(`→ **${lang.toUpperCase()}**${icon} ${c.partial ? '*' : ''}${escapeMd(text)}${c.partial ? '…*' : ''}`);
+    lines.push(`${flag(lang)} ${c.partial ? '*' : ''}${escapeMd(text)}${c.partial ? '…*' : ''}`);
   }
-  if (c.flags?.includes('low_confidence')) lines.push('⚠️ *Low confidence — could you say that again?*');
+  if (c.flags?.includes('low_confidence')) lines.push('-# 🤔 Didn’t catch that clearly. Could you say it again?');
   for (const n of c.notes ?? []) if (n) lines.push(`-# ${escapeMd(n)}`);
   let out = lines.join('\n');
   if (out.length > MAX_LEN) out = out.slice(0, MAX_LEN - 1) + '…';

@@ -7,7 +7,7 @@ import { generateDependencyReport } from '@discordjs/voice';
 
 import { opusBackend } from './audio/opus.js';
 import { loadConfig } from './config.js';
-import { COMMANDS } from './discord/commands.js';
+import { COMMANDS, SIMPLE_COMMANDS } from './discord/commands.js';
 import { TranslatorBot } from './discord/bot.js';
 import { Metrics } from './metrics/Metrics.js';
 import { Store } from './store/Store.js';
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
       try {
         const rest = new REST().setToken(cfg.discordToken);
         const route = cfg.devGuildId ? Routes.applicationGuildCommands(cfg.clientId, cfg.devGuildId) : Routes.applicationCommands(cfg.clientId);
-        await rest.put(route, { body: COMMANDS });
+        await rest.put(route, { body: cfg.pipeline === 'cloud' ? SIMPLE_COMMANDS : COMMANDS });
         log.info('slash commands registered', { scope: cfg.devGuildId ? `guild ${cfg.devGuildId}` : 'global' });
       } catch (e) {
         log.error('command registration failed', { err: e });

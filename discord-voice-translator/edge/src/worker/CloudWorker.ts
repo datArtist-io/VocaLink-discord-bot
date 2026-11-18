@@ -18,8 +18,8 @@
  * order, the original tokens already in L plus the translation tokens into L. Soniox
  * emits each translated chunk right after its source chunk, so the order is correct.
  *
- * v1 limit: one Soniox stream per speaker, so at most two languages per server
- * (two-way translation, e.g. Tagalog <-> English) or one target (one-way).
+ * Any language in, every server language out: each speaker has one Soniox lane per server
+ * language (up to 3), each translating whatever is spoken into that language.
  */
 
 import { EventEmitter } from 'node:events';
@@ -43,6 +43,7 @@ const ELEVEN_LANGS: Record<string, string> = {
 
 const PHRASE_END = /[.!?,;:。！？、]\s*$/;
 const MIN_WORDS_TO_SPEAK = 4;
+const MAX_LANGS = 3; // server languages (one Soniox lane per language per speaker)
 const PHRASE_TIMEOUT_MS = 300;
 const IDLE_CLOSE_MS = 10 * 60_000; // keep each speaker's line open between turns so the next one starts instantly
 const TTS_FIRST_BYTE_MS = 3_000; // a dub that hasn't started by now is retried once
@@ -77,6 +78,8 @@ export interface CloudWorkerOptions {
 interface GuildCfg {
   textTargets: string[];
   audioTargets: string[];
+  /** languages spoken into the voice channel itself (one per phrase, see chooseChannelDub) */
+  channelDub: string[];
   expected: string[] | null;
 }
 
@@ -86,10 +89,32 @@ interface Utt {
   langCount: Map<string, number>;
   confSum: number;
   confN: number;
-  text: Map<string, string>; // per target: final text (translation + passthrough)
-  phrase: Map<string, { text: string; translated: boolean }>; // per audio target: not yet spoken
-  translatedInto: Set<string>; // targets that needed translation in this utterance
+  text: string; // this lane's target text: translations into it + words already in it
+  phrase: { text: string; translated: boolean }; // not yet spoken
+  translatedInto: boolean; // part of this utterance needed translating into the target
   firstAt: number;
+}
+
+/**
+ * One Soniox socket per (speaker, server language). Each lane translates ANY spoken language
+ * into its own target (one-way), so every language is understood and every server language
+ * is produced. The first lane is the primary: it drives captions and utterance boundaries.
+ */
+interface Lane {
+  target: string | null;
+  primary: boolean;
+  ws: WebSocket | null;
+  wsOpen: boolean;
+  sig: string;
+  pending: Buffer[];
+  pendingBytes: number;
+  keepalive: NodeJS.Timeout | null;
+  phraseTimer: NodeJS.Timeout | null;
+  retryAt: number;
+  backoffMs: number;
+  utt: Utt;
+  nextUtt: number;
+  completed: Map<number, string>; // utt id -> final target text (secondary lanes)
 }
 
 interface Stream {
@@ -98,23 +123,13 @@ interface Stream {
   userId: string;
   name: string;
   speakLang: string;
-  ws: WebSocket | null;
-  wsOpen: boolean;
-  sig: string;
   agc: Agc;
   pitch: PitchTracker;
   lastSaid: Map<string, string>; // per language: previous dubbed phrase, for smooth continuous delivery
-  pending: Buffer[];
-  pendingBytes: number;
   lastAudioAt: number;
-  keepalive: NodeJS.Timeout | null;
-  phraseTimer: NodeJS.Timeout | null;
-  utt: Utt;
-  nextUtt: number;
+  lanes: Map<string, Lane>;
   lastPartial: string;
   errorNotified: boolean;
-  retryAt: number;
-  backoffMs: number;
 }
 
 interface Dub {
@@ -181,7 +196,7 @@ export class CloudWorker extends EventEmitter {
   stop(): void {
     this.status = 'stopped';
     if (this.sweeper) clearInterval(this.sweeper);
-    for (const s of this.streams.values()) this.closeSession(s, false);
+    for (const st of this.streams.values()) this.closeLanes(st, false);
     this.streams.clear();
     for (const d of this.dubs.values()) d.ctrl.abort();
     this.dubs.clear();
@@ -205,14 +220,14 @@ export class CloudWorker extends EventEmitter {
         const s = this.streams.get(Number(m.sid));
         if (s) {
           s.speakLang = String(m.speak_lang ?? 'auto');
-          this.closeSession(s, true); // reopens with new hints on next audio
+          this.closeLanes(s, true); // reopen with new hints on next audio
         }
         break;
       }
       case 'stream_close': {
         const s = this.streams.get(Number(m.sid));
         if (s) {
-          this.closeSession(s, true);
+          this.closeLanes(s, true);
           this.streams.delete(s.sid);
           // call over for this server: free its voices for the next call
           if (![...this.streams.values()].some((x) => x.guildId === s.guildId)) this.voiceOf.delete(s.guildId);
@@ -234,19 +249,22 @@ export class CloudWorker extends EventEmitter {
     const pcm = s.agc.process(raw); // lift faint speakers before recognition
     s.pitch.push(pcm);
     s.lastAudioAt = performance.now();
-    if (!s.ws && s.lastAudioAt >= s.retryAt) this.openSession(s);
-    if (s.wsOpen && s.ws?.readyState === WebSocket.OPEN) {
-      s.ws.send(pcm);
-      return;
+    this.syncLanes(s);
+    for (const lane of s.lanes.values()) {
+      if (!lane.ws && s.lastAudioAt >= lane.retryAt) this.openLane(s, lane);
+      if (lane.wsOpen && lane.ws?.readyState === WebSocket.OPEN) {
+        lane.ws.send(pcm);
+        continue;
+      }
+      if (lane.pendingBytes + pcm.length > MAX_PENDING_AUDIO_BYTES) {
+        const drop = lane.pending.shift();
+        if (drop) lane.pendingBytes -= drop.length;
+        this.stats.audioDroppedCongested++;
+      }
+      lane.pending.push(pcm);
+      lane.pendingBytes += pcm.length;
+      this.stats.audioBuffered++;
     }
-    if (s.pendingBytes + pcm.length > MAX_PENDING_AUDIO_BYTES) {
-      const drop = s.pending.shift();
-      if (drop) s.pendingBytes -= drop.length;
-      this.stats.audioDroppedCongested++;
-    }
-    s.pending.push(pcm);
-    s.pendingBytes += pcm.length;
-    this.stats.audioBuffered++;
   }
 
   sendBlob(): boolean {
@@ -255,7 +273,7 @@ export class CloudWorker extends EventEmitter {
 
   dropStream(sid: number): void {
     const s = this.streams.get(sid);
-    if (s) s.pending = [];
+    if (s) for (const l of s.lanes.values()) { l.pending = []; l.pendingBytes = 0; }
   }
 
   async request<T extends Json = Json>(msg: Json, resultType: string): Promise<T> {
@@ -266,85 +284,91 @@ export class CloudWorker extends EventEmitter {
 
   // ------------------------------------------------------------------ config
   private onGuildConfig(m: Json): void {
+    const audio = (m.audio_targets as string[] | undefined) ?? [];
     const cfg: GuildCfg = {
       textTargets: (m.text_targets as string[] | undefined) ?? [],
-      audioTargets: (m.audio_targets as string[] | undefined) ?? [],
+      audioTargets: audio,
+      channelDub: (m.channel_dub_langs as string[] | undefined) ?? audio,
       expected: (m.expected_langs as string[] | null | undefined) ?? null,
     };
     this.guilds.set(String(m.guild_id), cfg);
-    for (const s of this.streams.values()) {
-      if (s.guildId === String(m.guild_id) && s.ws && this.signature(s) !== s.sig) this.closeSession(s, true);
-    }
+    for (const s of this.streams.values()) if (s.guildId === String(m.guild_id)) this.syncLanes(s);
   }
 
   private onStreamOpen(m: Json): void {
     this.warm();
     const sid = Number(m.sid);
     const old = this.streams.get(sid);
-    if (old) this.closeSession(old, false);
+    if (old) this.closeLanes(old, false);
     this.streams.set(sid, {
       sid,
       guildId: String(m.guild_id),
       userId: String(m.user_id),
       name: String(m.name ?? ''),
       speakLang: String(m.speak_lang ?? 'auto'),
-      ws: null,
-      wsOpen: false,
-      sig: '',
       agc: new Agc(),
       pitch: new PitchTracker(),
       lastSaid: new Map(),
-      pending: [],
-      pendingBytes: 0,
       lastAudioAt: performance.now(),
-      keepalive: null,
-      phraseTimer: null,
-      utt: newUtt(1),
-      nextUtt: 2,
+      lanes: new Map(),
       lastPartial: '',
       errorNotified: false,
-      retryAt: 0,
-      backoffMs: 500,
     });
   }
 
-  /** Target languages of a guild, capped at two (one Soniox stream per speaker). */
-  private targets(guildId: string): string[] {
+  /** The server's languages, in order (first = main language). */
+  targets(guildId: string): string[] {
     const g = this.guilds.get(guildId);
-    const all = [...new Set([...(g?.audioTargets ?? []), ...(g?.textTargets ?? [])])];
-    if (all.length > 2) this.noticeOnce(guildId, 'too_many_langs', `Fast mode translates between up to two languages per server for now; using ${all.slice(0, 2).map(languageName).join(' and ')}.`);
-    return all.slice(0, 2);
+    const all = [...new Set([...(g?.channelDub ?? []), ...(g?.textTargets ?? []), ...(g?.audioTargets ?? [])])];
+    if (all.length > MAX_LANGS) this.noticeOnce(guildId, 'too_many_langs', `VocaLink translates into up to ${MAX_LANGS} languages per server; using ${all.slice(0, MAX_LANGS).map(languageName).join(', ')}.`);
+    return all.slice(0, MAX_LANGS);
   }
 
   private hints(s: Stream, targets: string[]): string[] {
     if (s.speakLang && s.speakLang !== 'auto') return [s.speakLang];
     const g = this.guilds.get(s.guildId);
-    return [...new Set([...(g?.expected ?? this.o.defaultLangs), ...targets])];
+    // soft hints only: any other language is still recognised and translated
+    return [...new Set([...targets, ...(g?.expected ?? [])])];
   }
 
-  private signature(s: Stream): string {
-    const t = this.targets(s.guildId);
-    return JSON.stringify([t, this.hints(s, t)]);
+  /** Make the speaker's lanes match the server's languages (one lane per language). */
+  private syncLanes(s: Stream): void {
+    const targets = this.targets(s.guildId);
+    const keys = targets.length ? targets : ['-'];
+    for (const [k, lane] of s.lanes) {
+      if (!keys.includes(k)) {
+        this.closeLane(lane, true);
+        s.lanes.delete(k);
+      }
+    }
+    const hintsSig = JSON.stringify(this.hints(s, targets));
+    keys.forEach((k, i) => {
+      let lane = s.lanes.get(k);
+      if (!lane) {
+        lane = {
+          target: k === '-' ? null : k, primary: false, ws: null, wsOpen: false, sig: hintsSig, pending: [], pendingBytes: 0,
+          keepalive: null, phraseTimer: null, retryAt: 0, backoffMs: 500, utt: newUtt(1), nextUtt: 2, completed: new Map(),
+        };
+        s.lanes.set(k, lane);
+      } else if (lane.ws && lane.sig !== hintsSig) {
+        this.closeLane(lane, true); // hints changed: reopen on next audio
+      }
+      lane.primary = i === 0;
+    });
   }
 
-  // ------------------------------------------------------------------ Soniox session
-  private openSession(s: Stream): void {
+  // ------------------------------------------------------------------ Soniox lanes
+  private openLane(s: Stream, lane: Lane): void {
     const targets = this.targets(s.guildId);
     const hints = this.hints(s, targets);
-    s.sig = this.signature(s);
+    lane.sig = JSON.stringify(hints);
     const ws = new WebSocket(this.o.sonioxUrl, this.o.wsAgent ? { agent: this.o.wsAgent } : undefined);
-    s.ws = ws;
-    s.wsOpen = false;
-    const translation =
-      targets.length === 2
-        ? { type: 'two_way', language_a: targets[0], language_b: targets[1] }
-        : targets.length === 1
-          ? { type: 'one_way', target_language: targets[0] }
-          : undefined;
+    lane.ws = ws;
+    lane.wsOpen = false;
     ws.on('open', async () => {
       try {
         const apiKey = await this.o.sonioxKey();
-        if (s.ws !== ws) return;
+        if (lane.ws !== ws) return;
         ws.send(JSON.stringify({
           api_key: apiKey,
           model: this.o.sonioxModel,
@@ -354,55 +378,55 @@ export class CloudWorker extends EventEmitter {
           language_hints: hints,
           enable_language_identification: true,
           enable_endpoint_detection: true,
-          client_reference_id: `g${s.guildId}-s${s.sid}`,
-          ...(translation ? { translation } : {}),
+          client_reference_id: `g${s.guildId}-s${s.sid}-${lane.target ?? 'stt'}`,
+          ...(lane.target ? { translation: { type: 'one_way', target_language: lane.target } } : {}),
         }));
-        s.wsOpen = true;
-        s.backoffMs = 500;
-        for (const p of s.pending) ws.send(p);
-        s.pending = [];
-        s.pendingBytes = 0;
-        s.keepalive = setInterval(() => {
+        lane.wsOpen = true;
+        lane.backoffMs = 500;
+        for (const p of lane.pending) ws.send(p);
+        lane.pending = [];
+        lane.pendingBytes = 0;
+        lane.keepalive = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN && performance.now() - s.lastAudioAt > KEEPALIVE_MS) ws.send(JSON.stringify({ type: 'keepalive' }));
         }, KEEPALIVE_MS);
-        s.keepalive.unref();
+        lane.keepalive.unref();
       } catch (e) {
         this.log.error('soniox key error', { err: e });
         ws.close();
       }
     });
     ws.on('message', (data) => {
-      if (s.ws !== ws) return;
+      if (lane.ws !== ws) return;
       try {
-        this.onSoniox(s, JSON.parse(String(data)));
+        this.onSoniox(s, lane, JSON.parse(String(data)));
       } catch (e) {
         this.log.warn('bad soniox message', { err: e });
       }
     });
-    ws.on('error', (e) => this.log.warn('soniox socket error', { sid: s.sid, err: e }));
+    ws.on('error', (e) => this.log.warn('soniox socket error', { sid: s.sid, lane: lane.target, err: e }));
     ws.on('close', () => {
-      if (s.ws !== ws) return;
-      if (!s.wsOpen) {
+      if (lane.ws !== ws) return;
+      if (!lane.wsOpen) {
         // never got going: back off instead of retrying on every audio frame
-        s.retryAt = performance.now() + s.backoffMs;
-        s.backoffMs = Math.min(s.backoffMs * 2, 15_000);
+        lane.retryAt = performance.now() + lane.backoffMs;
+        lane.backoffMs = Math.min(lane.backoffMs * 2, 15_000);
       }
-      this.flushPhrases(s, true);
-      if (s.keepalive) clearInterval(s.keepalive);
-      s.keepalive = null;
-      s.ws = null;
-      s.wsOpen = false;
+      this.flushPhrase(s, lane, true);
+      if (lane.keepalive) clearInterval(lane.keepalive);
+      lane.keepalive = null;
+      lane.ws = null;
+      lane.wsOpen = false;
     });
   }
 
-  private closeSession(s: Stream, graceful: boolean): void {
-    const ws = s.ws;
-    if (s.keepalive) clearInterval(s.keepalive);
-    if (s.phraseTimer) clearTimeout(s.phraseTimer);
-    s.keepalive = null;
-    s.phraseTimer = null;
-    s.pending = [];
-    s.pendingBytes = 0;
+  private closeLane(lane: Lane, graceful: boolean): void {
+    const ws = lane.ws;
+    if (lane.keepalive) clearInterval(lane.keepalive);
+    if (lane.phraseTimer) clearTimeout(lane.phraseTimer);
+    lane.keepalive = null;
+    lane.phraseTimer = null;
+    lane.pending = [];
+    lane.pendingBytes = 0;
     if (!ws) return;
     if (graceful && ws.readyState === WebSocket.OPEN) {
       // empty frame = end of audio; Soniox finalises remaining tokens, then closes
@@ -410,19 +434,28 @@ export class CloudWorker extends EventEmitter {
       const t = setTimeout(() => ws.terminate(), 3_000);
       t.unref();
     } else {
-      s.ws = null;
-      s.wsOpen = false;
+      lane.ws = null;
+      lane.wsOpen = false;
       ws.terminate();
     }
   }
 
+  private closeLanes(s: Stream, graceful: boolean): void {
+    for (const lane of s.lanes.values()) this.closeLane(lane, graceful);
+  }
+
   private sweep(): void {
     const now = performance.now();
-    for (const s of this.streams.values()) if (s.ws && now - s.lastAudioAt > IDLE_CLOSE_MS) this.closeSession(s, true);
+    for (const s of this.streams.values()) if (now - s.lastAudioAt > IDLE_CLOSE_MS) for (const l of s.lanes.values()) if (l.ws) this.closeLane(l, true);
+  }
+
+  private primaryLane(s: Stream): Lane | undefined {
+    for (const l of s.lanes.values()) if (l.primary) return l;
+    return undefined;
   }
 
   // ------------------------------------------------------------------ tokens
-  private onSoniox(s: Stream, d: Record<string, unknown>): void {
+  private onSoniox(s: Stream, lane: Lane, d: Record<string, unknown>): void {
     if (d.error_code) {
       this.log.error('soniox error', { code: d.error_code, message: d.error_message });
       this.emit('event', { type: 'error', sid: s.sid, message: String(d.error_message), stage: 'stt' });
@@ -434,18 +467,17 @@ export class CloudWorker extends EventEmitter {
     }
     const tokens = (d.tokens as SonioxToken[] | undefined) ?? [];
     if (!tokens.length) return;
-    const u = s.utt;
+    const u = lane.utt;
     let tentative = '';
-    const tentativeTr = new Map<string, string>();
-    const audio = new Set(this.guilds.get(s.guildId)?.audioTargets ?? []);
-    const targets = new Set(this.targets(s.guildId));
+    let tentativeTr = '';
     let ended = false;
-    let gotFinalForAudio = false;
+    let gotFinal = false;
 
     for (const t of tokens) {
+      const isTr = t.translation_status === 'translation';
+      const inTarget = lane.target !== null && t.language === lane.target;
       if (!t.is_final) {
-        if (t.translation_status === 'translation') tentativeTr.set(t.language ?? '', (tentativeTr.get(t.language ?? '') ?? '') + t.text);
-        else tentative += t.text;
+        if (isTr) { if (inTarget) tentativeTr += t.text; } else tentative += t.text;
         continue;
       }
       if (t.text === '<end>' || t.text === '<fin>') {
@@ -453,84 +485,98 @@ export class CloudWorker extends EventEmitter {
         continue;
       }
       if (!u.firstAt) u.firstAt = performance.now();
-      const lang = t.language ?? '';
-      const isTr = t.translation_status === 'translation';
       if (!isTr) {
         u.original += t.text;
-        if (lang && t.text.trim()) u.langCount.set(lang, (u.langCount.get(lang) ?? 0) + 1);
+        if (t.language && t.text.trim()) u.langCount.set(t.language, (u.langCount.get(t.language) ?? 0) + 1);
         if (typeof t.confidence === 'number') {
           u.confSum += t.confidence;
           u.confN++;
         }
       }
-      // target text = translations into L + original tokens already in L (Taglish passthrough)
-      if (lang && targets.has(lang)) {
-        u.text.set(lang, (u.text.get(lang) ?? '') + t.text);
-        if (audio.has(lang)) {
-          const p = u.phrase.get(lang) ?? { text: '', translated: false };
-          p.text += t.text;
-          if (isTr) {
-            p.translated = true;
-            u.translatedInto.add(lang);
-          }
-          u.phrase.set(lang, p);
-          gotFinalForAudio = true;
+      // target text = translations into the target + original words already in it (Taglish passthrough)
+      if (inTarget) {
+        u.text += t.text;
+        u.phrase.text += t.text;
+        if (isTr) {
+          u.phrase.translated = true;
+          u.translatedInto = true;
         }
+        gotFinal = true;
       }
     }
 
-    // live captions
-    const committed = u.original.trim();
-    const key = committed + '|' + tentative;
-    if (key !== s.lastPartial && (committed || tentative.trim())) {
-      s.lastPartial = key;
-      const lang = topLang(u) ?? '';
-      this.emit('event', { type: 'partial', sid: s.sid, utt_id: u.id, lang, committed, tentative: tentative.trim() });
-      const tr: Record<string, string> = {};
-      for (const l of targets) {
-        const txt = ((u.text.get(l) ?? '') + (tentativeTr.get(l) ?? '')).trim();
-        if (txt && l !== lang) tr[l] = txt;
+    // live captions: the primary lane owns the original text; every lane adds its translation
+    const primary = this.primaryLane(s);
+    if (lane.primary) {
+      const committed = u.original.trim();
+      const key = committed + '|' + tentative;
+      if (key !== s.lastPartial && (committed || tentative.trim())) {
+        s.lastPartial = key;
+        this.emit('event', { type: 'partial', sid: s.sid, utt_id: u.id, lang: topLang(u) ?? '', committed, tentative: tentative.trim() });
       }
-      if (Object.keys(tr).length) this.emit('event', { type: 'partial_translation', sid: s.sid, utt_id: u.id, lang, translations: tr });
+    }
+    if (lane.target && (gotFinal || tentativeTr)) {
+      const txt = (u.text + tentativeTr).trim();
+      const src = topLang(u);
+      if (txt && lane.target !== src && primary) {
+        this.emit('event', { type: 'partial_translation', sid: s.sid, utt_id: primary.utt.id, lang: src ?? '', translations: { [lane.target]: txt } });
+      }
     }
 
     if (ended) {
-      this.flushPhrases(s, true);
-      this.finishUtt(s);
-    } else if (gotFinalForAudio) {
-      this.flushPhrases(s, false);
+      this.flushPhrase(s, lane, true);
+      this.finishLaneUtt(s, lane);
+    } else if (gotFinal) {
+      this.flushPhrase(s, lane, false);
     }
   }
 
-  /** Speak finished phrases now; hold short unfinished ones briefly. */
-  private flushPhrases(s: Stream, force: boolean): void {
-    if (s.phraseTimer) clearTimeout(s.phraseTimer);
-    s.phraseTimer = null;
-    let holding = false;
-    const spoken = topLang(s.utt); // the language this person is mainly speaking right now
-    for (const [lang, p] of s.utt.phrase) {
-      const text = p.text.trim();
-      if (!text) continue;
-      const words = text.split(/\s+/).length;
-      if (force || PHRASE_END.test(text) || words >= MIN_WORDS_TO_SPEAK) {
-        // speak it if any part of this utterance needed translating into `lang`
-        // (keeps the English words of a Taglish sentence in an English dub)
-        // never dub into the language the person is mainly speaking (so Taglish gets one dub, not two)
-        if ((p.translated || s.utt.translatedInto.has(lang)) && lang !== spoken) this.speak(s, lang, text);
-        s.utt.phrase.set(lang, { text: '', translated: false });
-      } else {
-        holding = true;
+  /**
+   * Which language a phrase is spoken in, in the voice channel itself: the first server
+   * language that is not the one this person is speaking. (English speech -> French voice,
+   * French speech -> English voice, anything else -> the main language.) Listeners on the
+   * web companion get every language they picked.
+   */
+  private shouldSpeak(s: Stream, target: string, spoken: string | null): boolean {
+    const g = this.guilds.get(s.guildId);
+    if (!g || !g.audioTargets.includes(target) || target === spoken) return false;
+    if (!g.channelDub.includes(target)) return true; // companion / mirror language
+    return g.channelDub.find((l) => l !== spoken) === target;
+  }
+
+  /** Speak a finished phrase now; hold a short unfinished one briefly. */
+  private flushPhrase(s: Stream, lane: Lane, force: boolean): void {
+    if (lane.phraseTimer) clearTimeout(lane.phraseTimer);
+    lane.phraseTimer = null;
+    const u = lane.utt;
+    const p = u.phrase;
+    const text = p.text.trim();
+    if (!text || !lane.target) return;
+    const words = text.split(/\s+/).length;
+    if (force || PHRASE_END.test(text) || words >= MIN_WORDS_TO_SPEAK) {
+      // speak if any part of this utterance needed translating (keeps the English words of a
+      // Taglish sentence inside an English dub), into the right language for this speaker
+      if ((p.translated || u.translatedInto) && this.shouldSpeak(s, lane.target, topLang(u))) this.speak(s, lane.target, text);
+      u.phrase = { text: '', translated: false };
+    } else {
+      lane.phraseTimer = setTimeout(() => this.flushPhrase(s, lane, true), PHRASE_TIMEOUT_MS);
+      lane.phraseTimer.unref();
+    }
+  }
+
+  private finishLaneUtt(s: Stream, lane: Lane): void {
+    const u = lane.utt;
+    lane.utt = newUtt(lane.nextUtt++);
+    if (!lane.primary) {
+      // a secondary language finished this sentence: remember it and update the caption
+      if (lane.target) {
+        const t = u.text.trim();
+        lane.completed.set(u.id, t);
+        if (lane.completed.size > 20) lane.completed.delete(lane.completed.keys().next().value!);
+        if (t) this.emit('event', { type: 'final_translation', sid: s.sid, utt_id: u.id, lang: lane.target, text: t });
       }
+      return;
     }
-    if (holding) {
-      s.phraseTimer = setTimeout(() => this.flushPhrases(s, true), PHRASE_TIMEOUT_MS);
-      s.phraseTimer.unref();
-    }
-  }
-
-  private finishUtt(s: Stream): void {
-    const u = s.utt;
-    s.utt = newUtt(s.nextUtt++);
     s.lastPartial = '';
     const text = u.original.trim();
     if (!text) return;
@@ -539,10 +585,11 @@ export class CloudWorker extends EventEmitter {
     const audio = new Set(g?.audioTargets ?? []);
     const translations: Record<string, { text: string | null; provider: string | null; mode: string | null; note: string }> = {};
     const tiers: Record<string, number> = {};
-    for (const l of this.targets(s.guildId)) {
-      const t = (u.text.get(l) ?? '').trim();
-      translations[l] = { text: t || (l === lang ? text : null), provider: 'soniox', mode: 'literal', note: '' };
-      tiers[l] = audio.has(l) && ELEVEN_LANGS[l] ? 2 : 3;
+    for (const [k, l] of s.lanes) {
+      if (!l.target) continue;
+      const t = l === lane ? u.text.trim() : (l.completed.get(u.id) ?? (l.utt.id === u.id ? l.utt.text.trim() : ''));
+      translations[k] = { text: t || (k === lang ? text : null), provider: 'soniox', mode: 'literal', note: '' };
+      tiers[k] = audio.has(k) && ELEVEN_LANGS[k] ? 2 : 3;
     }
     const confidence = u.confN ? u.confSum / u.confN : 1;
     const sinceFirst = u.firstAt ? performance.now() - u.firstAt : 0;
@@ -566,7 +613,7 @@ export class CloudWorker extends EventEmitter {
     s.lastSaid.set(lang, text);
     this.dubs.set(dubId, { ctrl, sid: s.sid, startedAt });
     this.emit('event', {
-      type: 'tts_start', dub_id: dubId, sid: s.sid, utt_id: s.utt.id, user_id: s.userId, lang, text,
+      type: 'tts_start', dub_id: dubId, sid: s.sid, utt_id: this.primaryLane(s)?.utt.id ?? 0, user_id: s.userId, lang, text,
       tier: 2, voice: 'house', provider: 'elevenlabs', incremental: true, sample_rate: 48000,
     });
     void this.synthesize(dubId, { voiceId, elLang, text, previous }, ctrl.signal, startedAt);
@@ -744,7 +791,7 @@ interface SonioxToken {
 }
 
 function newUtt(id: number): Utt {
-  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: new Map(), phrase: new Map(), translatedInto: new Set(), firstAt: 0 };
+  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, firstAt: 0 };
 }
 
 function topLang(u: Utt): string | null {

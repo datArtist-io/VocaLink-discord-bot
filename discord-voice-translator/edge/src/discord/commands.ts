@@ -125,3 +125,23 @@ export const COMMANDS = [
   { name: 'languages', description: 'Which languages get cloned voice, standard voice or captions', contexts: [0], options: [lang('code', 'Show one language in detail')] },
   { name: 'dashboard', description: 'Analytics dashboard link', contexts: [0], default_member_permissions: MANAGE_GUILD },
 ];
+
+/**
+ * The compact command set used in fast (cloud) mode: everything a server needs, nothing else.
+ *   /translate start|stop   ·   /setup   ·   /listen   ·   /optout   ·   /optin
+ */
+export const SIMPLE_COMMANDS = [
+  {
+    name: 'translate',
+    description: 'Live voice translation in your voice channel',
+    contexts: [0],
+    options: [
+      { type: SUB, name: 'start', description: 'Start translating the voice channel you are in' },
+      { type: SUB, name: 'stop', description: 'Stop translating' },
+    ],
+  },
+  { name: 'setup', description: 'Choose your server languages, voice and captions', contexts: [0], default_member_permissions: MANAGE_GUILD },
+  { name: 'listen', description: 'Hear only your language, in your own player', contexts: [0], options: [lang('lang', 'Your language')] },
+  { name: 'optout', description: 'Never translate or process my voice', contexts: [0] },
+  { name: 'optin', description: 'Allow my voice to be translated again', contexts: [0] },
+];

@@ -23,21 +23,23 @@ export interface GuildSettings {
   summaries: boolean;
   expectedLangs: string[] | null; // restrict auto-detect
   captionsInThread: boolean;
+  captions: boolean;              // post live captions at all
 }
 
 /** Settings schema version; rows written before v2 used the old defaults. */
 const SETTINGS_VERSION = 2;
 
 export const DEFAULT_SETTINGS: GuildSettings = {
-  textTargets: ['en', 'tl'],      // captions in English and Tagalog
+  textTargets: ['en', 'tl'],      // the server's languages (1-3): everything said is translated into these
   dubLang: 'auto',                // dubbing on: Tagalog speech -> English voice, English speech -> Tagalog voice
   mode: 'literal',
   voiceMode: 'house',
   mirrors: false,
   mirrorLangs: [],
   summaries: false,               // not available in the fast cloud pipeline yet
-  expectedLangs: ['tl', 'en'],    // helps recognition of Tagalog / Taglish
+  expectedLangs: null,            // server languages are used as recognition hints
   captionsInThread: true,
+  captions: true,
 };
 
 export interface UserPrefs {

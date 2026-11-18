@@ -38,6 +38,8 @@ const VOICED_RMS = 600; // frames quieter than this (after gain control) are not
 export class VoiceBank {
   private samples = new Map<string, { chunks: Buffer[]; bytes: number }>();
   private creating = new Set<string>();
+  /** bumped whenever someone withdraws ("Delete my voice", another voice, opt-out) */
+  private gen = new Map<string, number>();
 
   constructor(
     private readonly store: Store,
@@ -57,6 +59,13 @@ export class VoiceBank {
   setPref(userId: string, pref: string | null): void {
     this.store.setKv(`voicepref:${userId}`, pref ?? '');
     if (pref === 'clone') this.store.setKv(`voiceconsent:${userId}`, String(Date.now()));
+    else this.forget(userId); // no longer consenting: drop any speech held for learning
+  }
+
+  /** Drop speech held for learning (never kept beyond the call or after a change of mind). */
+  forget(userId: string): void {
+    this.samples.delete(userId);
+    this.gen.set(userId, (this.gen.get(userId) ?? 0) + 1);
   }
 
   cloneId(userId: string): string | null {
@@ -103,6 +112,7 @@ export class VoiceBank {
 
   private async create(userId: string, pcm: Buffer): Promise<void> {
     this.creating.add(userId);
+    const myGen = this.gen.get(userId) ?? 0;
     try {
       const form = new FormData();
       form.append('name', `VocaLink ${userId}`);
@@ -118,9 +128,16 @@ export class VoiceBank {
         this.o.log.warn('voice clone failed', { status: r.status, msg: msg.slice(0, 200) });
         return;
       }
+      if ((this.gen.get(userId) ?? 0) !== myGen || this.pref(userId) !== 'clone') {
+        // they withdrew while it was being created: delete it at once, never keep it
+        await this.deleteVoice(body.voice_id);
+        return;
+      }
       this.store.setKv(`clone:${userId}`, body.voice_id);
       this.o.log.info('voice clone ready');
     } catch (e) {
+      // record it so we don't silently re-upload their voice on every 45 s of speech
+      this.store.setKv(`cloneerr:${userId}`, 'Creating your voice failed. Choose "My own voice" again to retry');
       this.o.log.warn('voice clone error', { err: e });
     } finally {
       this.creating.delete(userId); // the recorded speech is not kept anywhere
@@ -129,15 +146,17 @@ export class VoiceBank {
 
   /** Delete the person's cloned voice everywhere and stop learning. */
   async remove(userId: string): Promise<void> {
-    this.samples.delete(userId);
+    this.forget(userId);
     const id = this.cloneId(userId);
     this.store.setKv(`clone:${userId}`, '');
     this.store.setKv(`cloneerr:${userId}`, '');
     if (this.pref(userId) === 'clone') this.setPref(userId, null);
-    if (id) {
-      await fetch(`${this.base}/v1/voices/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'xi-api-key': this.o.elevenKey }, signal: AbortSignal.timeout(15_000) })
-        .catch((e) => this.o.log.warn('voice delete failed', { err: e }));
-    }
+    if (id) await this.deleteVoice(id);
+  }
+
+  private async deleteVoice(id: string): Promise<void> {
+    await fetch(`${this.base}/v1/voices/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'xi-api-key': this.o.elevenKey }, signal: AbortSignal.timeout(15_000) })
+      .catch((e) => this.o.log.warn('voice delete failed', { err: e }));
   }
 
   /** Try again after a plan upgrade. */

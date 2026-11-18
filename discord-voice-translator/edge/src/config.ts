@@ -38,6 +38,13 @@ export interface EdgeConfig {
   privacyUrl: string;
 }
 
+/** A number from the environment; empty or invalid values fall back to the default. */
+function num(v: string | undefined, def: number): number {
+  if (v === undefined || v.trim() === '') return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
 function req(env: NodeJS.ProcessEnv, k: string): string {
   const v = env[k];
   if (!v) throw new Error(`missing required environment variable ${k}`);
@@ -46,7 +53,7 @@ function req(env: NodeJS.ProcessEnv, k: string): string {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { requireDiscord?: boolean } = {}): EdgeConfig {
   const requireDiscord = opts.requireDiscord ?? true;
-  const port = Number(env.WEB_PORT ?? env.PORT ?? 8080);
+  const port = num(env.WEB_PORT, num(env.PORT, 8080));
   const pipeline = (env.PIPELINE ?? (env.SONIOX_API_KEY && !env.WORKER_URLS ? 'cloud' : 'worker')) === 'cloud' ? 'cloud' : 'worker';
   if (pipeline === 'cloud') {
     req(env, 'SONIOX_API_KEY');
@@ -56,7 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { require
     discordToken: requireDiscord ? req(env, 'DISCORD_TOKEN') : (env.DISCORD_TOKEN ?? ''),
     clientId: requireDiscord ? req(env, 'DISCORD_CLIENT_ID') : (env.DISCORD_CLIENT_ID ?? ''),
     devGuildId: env.DEV_GUILD_ID || null,
-    registerCommandsOnStart: (env.REGISTER_COMMANDS ?? '1') === '1',
+    registerCommandsOnStart: !['0', 'false', 'no', 'off'].includes((env.REGISTER_COMMANDS ?? '1').trim().toLowerCase()),
     pipeline,
     cloud: {
       sonioxApiKey: env.SONIOX_API_KEY ?? '',
@@ -78,16 +85,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { require
     webSecret: env.WEB_SECRET || null,
     mirrorTokens: (env.MIRROR_BOT_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     defaultTextTargets: (env.DEFAULT_TEXT_TARGETS ?? 'en').split(',').map((s) => s.trim()).filter(Boolean),
-    autoLeaveMs: Number(env.AUTO_LEAVE_MS ?? 120_000),
-    listenTtlMs: Number(env.LISTEN_TTL_MS ?? 12 * 3600_000),
-    adminTtlMs: Number(env.ADMIN_TTL_MS ?? 3600_000),
+    autoLeaveMs: num(env.AUTO_LEAVE_MS, 120_000),
+    listenTtlMs: num(env.LISTEN_TTL_MS, 12 * 3600_000),
+    adminTtlMs: num(env.ADMIN_TTL_MS, 3600_000),
     logLevel: env.LOG_LEVEL ?? 'info',
     playout: {
-      staleMs: Number(env.DUB_STALE_MS ?? 3000),
-      maxQueue: Number(env.DUB_MAX_QUEUE ?? 3),
-      duckGain: Number(env.DUB_DUCK_GAIN ?? 0.35),
+      staleMs: num(env.DUB_STALE_MS, 3000),
+      maxQueue: num(env.DUB_MAX_QUEUE, 3),
+      duckGain: num(env.DUB_DUCK_GAIN, 0.35),
     },
-    daveFailureTolerance: Number(env.DAVE_FAILURE_TOLERANCE ?? 36),
+    daveFailureTolerance: num(env.DAVE_FAILURE_TOLERANCE, 36),
     consentVersion: env.CONSENT_VERSION ?? '2026-10-v1',
     privacyUrl: env.PRIVACY_URL ?? '',
   };

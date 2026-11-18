@@ -66,6 +66,7 @@ export class WebServer {
   private pingTimer: NodeJS.Timeout;
   private readonly dir: string;
   private pages = new Map<string, string>();
+  private lastRejectLog = 0;
 
   constructor(private readonly d: WebDeps) {
     this.dir = d.staticDir ?? join(here, 'static');
@@ -181,7 +182,10 @@ export class WebServer {
     }
     const p = this.d.signer.verify(url.searchParams.get('t'), 'listen');
     if (!p) {
-      this.d.log.warn('player rejected: link invalid or expired (e.g. signed before a restart without WEB_SECRET)');
+      if (Date.now() - this.lastRejectLog > 60_000) {
+        this.lastRejectLog = Date.now(); // an old tab retries forever: log at most once a minute
+        this.d.log.warn('player rejected: link invalid or expired (old tab or link from before a restart)');
+      }
       sock.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       sock.destroy();
       return;
@@ -196,7 +200,6 @@ export class WebServer {
       listener.rate = v >= 3 ? 48000 : 24000;
       // tell the player which build is live; a player from an older build reloads itself
       ws.send(JSON.stringify({ type: 'build', id: BUILD_ID }));
-      if (url.searchParams.get('lang') && lang !== 'auto') this.d.store.updateUser(p.u, { hearLang: lang }); // remember the choice
       this.d.metrics.inc('web_listener_connects');
       this.d.log.info('player connected', { guild: p.g, lang });
       ws.on('message', (data, isBinary) => {

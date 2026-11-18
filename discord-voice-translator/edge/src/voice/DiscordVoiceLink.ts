@@ -83,7 +83,8 @@ export class DiscordVoiceLink extends EventEmitter implements VoiceLinkLike {
   private player: AudioPlayer;
   private subs = new Map<string, Readable>();
   private destroyed = false;
-  private rejoining = false;
+  /** true while the link is reconnecting by itself (the bot briefly leaves voice) */
+  rejoining = false;
   private lastPacketAt = new Map<string, number>();
   private health = { streamErrors: 0, gaps: 0, packets: 0, rejoins: 0, windowStart: Date.now() };
   private healthTimer: NodeJS.Timeout;

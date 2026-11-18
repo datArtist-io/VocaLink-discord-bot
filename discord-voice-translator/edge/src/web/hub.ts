@@ -35,13 +35,13 @@ let nextId = 1;
 export class WebHub {
   private listeners = new Map<string, Set<Listener>>(); // guildId -> listeners
   private sessions = new Map<string, HubSession>();
-  /** dub id -> the user whose speech it translates (a listener never gets their own) */
-  private dubOwner = new Map<number, string>();
   stats = { audioFramesSent: 0, dropped: 0 };
 
   registerSession(guildId: string, s: HubSession): void {
     this.sessions.set(guildId, s);
     s.setWebLangs(this.langs(guildId));
+    // players opened before the call started: tell them it's live now
+    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'status', live: true, lang: l.lang });
   }
 
   unregisterSession(guildId: string): void {
@@ -87,8 +87,8 @@ export class WebHub {
   }
 
   /** a listener gets this person's translations unless it is themselves (and not in test mode) */
-  private wants(l: Listener, speaker: string | undefined): boolean {
-    return l.userId !== speaker || Boolean(l.hearSelf);
+  private wants(l: Listener, speaker: string): boolean {
+    return Boolean(speaker) && (l.userId !== speaker || Boolean(l.hearSelf));
   }
 
   detach(l: Listener): void {
@@ -121,8 +121,6 @@ export class WebHub {
 
   dubStart(guildId: string, lang: string, meta: Record<string, unknown>): void {
     const owner = String(meta.user_id ?? '');
-    this.dubOwner.set(Number(meta.dub_id), owner);
-    if (this.dubOwner.size > 500) this.dubOwner.delete(this.dubOwner.keys().next().value!);
     for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: l.rate ?? 24000 });
   }
 
@@ -131,9 +129,9 @@ export class WebHub {
     for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'speaking', user_id: userId, you: l.userId === userId && !l.hearSelf, on });
   }
 
-  dubAudio(guildId: string, lang: string, dubId: number, seq: number, pcm48: Buffer): void {
+  /** `owner` = whose speech this translates; required so nobody ever receives their own voice. */
+  dubAudio(guildId: string, lang: string, dubId: number, seq: number, pcm48: Buffer, owner: string): void {
     const pkts: Partial<Record<24000 | 48000, Buffer>> = {};
-    const owner = this.dubOwner.get(dubId);
     for (const l of this.listeners.get(guildId) ?? []) {
       if (l.lang !== lang || !this.wants(l, owner)) continue;
       if ((l.sock.bufferedAmount ?? 0) > 512 * 1024) {
@@ -154,10 +152,8 @@ export class WebHub {
     }
   }
 
-  dubEnd(guildId: string, lang: string, dubId: number): void {
-    const owner = this.dubOwner.get(dubId);
+  dubEnd(guildId: string, lang: string, dubId: number, owner: string): void {
     for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_end', dub_id: dubId });
-    this.dubOwner.delete(dubId);
   }
 
   notice(guildId: string, message: string): void {

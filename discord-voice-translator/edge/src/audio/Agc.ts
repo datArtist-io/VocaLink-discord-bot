@@ -50,7 +50,7 @@ export class Agc {
       this.gain += (want - this.gain) * k;
     }
     if (Math.abs(this.gain - 1) < 0.01) return pcm;
-    const out = Buffer.allocUnsafe(pcm.length);
+    const out = Buffer.alloc(pcm.length);
     for (let i = 0; i < n; i++) out.writeInt16LE(softClip(pcm.readInt16LE(i * 2) * this.gain), i * 2);
     return out;
   }

@@ -47,7 +47,8 @@ const MAX_LANGS = 3;
 /** Everyday chat / gaming words that recognisers often get wrong. */
 const CHAT_TERMS = ['Discord', 'ranked', 'GG', 'AFK', 'lag', 'carry', 'noob', 'pare', 'lods', 'bro', 'sis', 'bes', 'tol', 'petmalu', 'charot', 'sana all', 'Valorant', 'Mobile Legends', 'Minecraft', 'Roblox']; // server languages (one Soniox lane per language per speaker)
 const IDLE_CLOSE_MS = 10 * 60_000; // keep each speaker's line open between turns so the next one starts instantly
-const TTS_FIRST_BYTE_MS = 3_000; // a dub that hasn't started by now is retried once
+const TTS_FIRST_BYTE_MS = 3_000;
+const TTS_STALL_MS = 5_000; // no audio for this long mid-phrase: give up on that phrase // a dub that hasn't started by now is retried once
 const WARM_EVERY_MS = 45_000;
 
 /** House voices (ElevenLabs default library), split by pitch so a dub matches its speaker. */
@@ -125,8 +126,15 @@ interface Lane {
   nextUtt: number;
   /** finished sentences of a secondary lane, with when they were spoken */
   completed: { text: string; start: number; end: number; used: boolean }[];
-  /** wall-clock time of this lane's first audio frame (Soniox times are relative to it) */
+  /** position on the speaker's audio clock (ms of audio fed) of this socket's first frame;
+   *  Soniox times are relative to it, so all lanes share one timeline even across pauses */
   t0: number;
+  /** audio-clock position of pending[0] */
+  pendingStart: number;
+  /** a socket that is finishing gracefully (its last words are still processed) */
+  closing: WebSocket | null;
+  /** got real results on this socket (only then is the reconnect back-off reset) */
+  healthy: boolean;
 }
 
 interface Stream {
@@ -142,6 +150,10 @@ interface Stream {
   lanes: Map<string, Lane>;
   lastPartial: string;
   errorNotified: boolean;
+  /** ms of audio fed to this speaker's stream (a clock that pauses when they're silent) */
+  audioMs: number;
+  /** one caption-id counter per speaker, shared by all lanes */
+  nextUttId: number;
 }
 
 interface Dub {
@@ -246,6 +258,7 @@ export class CloudWorker extends EventEmitter {
         if (s) {
           this.closeLanes(s, true);
           this.streams.delete(s.sid);
+          this.o.voiceBank?.forget(s.userId); // left the call: drop any half-learned voice sample
           // call over for this server: free its voices for the next call
           if (![...this.streams.values()].some((x) => x.guildId === s.guildId)) this.voiceOf.delete(s.guildId);
         }
@@ -267,17 +280,20 @@ export class CloudWorker extends EventEmitter {
     s.pitch.push(pcm);
     this.o.voiceBank?.feed(s.userId, pcm); // learns their own voice, only if they chose "My own voice"
     s.lastAudioAt = performance.now();
+    const at = s.audioMs; // this frame's position on the speaker's audio clock
+    s.audioMs += pcm.length / 32; // 16 kHz s16 = 32 bytes per ms
     this.syncLanes(s);
     for (const lane of s.lanes.values()) {
-      if (!lane.ws && s.lastAudioAt >= lane.retryAt) { this.openLane(s, lane); lane.t0 = 0; }
-      if (!lane.t0) lane.t0 = s.lastAudioAt - pcm.length / 32; // this frame is the lane's time zero (16 kHz s16)
+      if (!lane.ws && !lane.closing && s.lastAudioAt >= lane.retryAt) this.openLane(s, lane);
       if (lane.wsOpen && lane.ws?.readyState === WebSocket.OPEN) {
+        if (lane.t0 < 0) lane.t0 = at;
         lane.ws.send(pcm);
         continue;
       }
+      if (!lane.pending.length) lane.pendingStart = at;
       if (lane.pendingBytes + pcm.length > MAX_PENDING_AUDIO_BYTES) {
         const drop = lane.pending.shift();
-        if (drop) lane.pendingBytes -= drop.length;
+        if (drop) { lane.pendingBytes -= drop.length; lane.pendingStart += drop.length / 32; }
         this.stats.audioDroppedCongested++;
       }
       lane.pending.push(pcm);
@@ -332,6 +348,8 @@ export class CloudWorker extends EventEmitter {
       lanes: new Map(),
       lastPartial: '',
       errorNotified: false,
+      audioMs: 0,
+      nextUttId: 1,
     });
   }
 
@@ -369,6 +387,7 @@ export class CloudWorker extends EventEmitter {
     const keys = targets.length ? targets : ['-'];
     for (const [k, lane] of s.lanes) {
       if (!keys.includes(k)) {
+        lane.primary = false;
         this.closeLane(lane, true);
         s.lanes.delete(k);
       }
@@ -379,11 +398,11 @@ export class CloudWorker extends EventEmitter {
       if (!lane) {
         lane = {
           target: k === '-' ? null : k, primary: false, ws: null, wsOpen: false, sig: hintsSig, pending: [], pendingBytes: 0,
-          keepalive: null, phraseTimer: null, retryAt: 0, backoffMs: 500, utt: newUtt(1), nextUtt: 2, completed: [], t0: 0,
+          keepalive: null, phraseTimer: null, retryAt: 0, backoffMs: 500, utt: newUtt(s.nextUttId++), nextUtt: 0, completed: [], t0: -1, pendingStart: 0, closing: null, healthy: false,
         };
         s.lanes.set(k, lane);
       } else if (lane.ws && lane.sig !== hintsSig) {
-        this.closeLane(lane, true); // hints changed: reopen on next audio
+        this.closeLane(lane, true); // hints changed: reopen on next audio (closeLane detaches, so once)
       }
       lane.primary = i === 0;
     });
@@ -397,6 +416,8 @@ export class CloudWorker extends EventEmitter {
     const ws = new WebSocket(this.o.sonioxUrl, this.o.wsAgent ? { agent: this.o.wsAgent } : undefined);
     lane.ws = ws;
     lane.wsOpen = false;
+    lane.t0 = -1;
+    lane.healthy = false;
     ws.on('open', async () => {
       try {
         const apiKey = await this.o.sonioxKey();
@@ -415,7 +436,7 @@ export class CloudWorker extends EventEmitter {
           ...(lane.target ? { translation: { type: 'one_way', target_language: lane.target } } : {}),
         }));
         lane.wsOpen = true;
-        lane.backoffMs = 500;
+        if (lane.pending.length) lane.t0 = lane.pendingStart; // the first frame this socket hears
         for (const p of lane.pending) ws.send(p);
         lane.pending = [];
         lane.pendingBytes = 0;
@@ -429,7 +450,7 @@ export class CloudWorker extends EventEmitter {
       }
     });
     ws.on('message', (data) => {
-      if (lane.ws !== ws) return;
+      if (lane.ws !== ws && lane.closing !== ws) return; // a closing socket still delivers its last words
       try {
         this.onSoniox(s, lane, JSON.parse(String(data)));
       } catch (e) {
@@ -438,17 +459,22 @@ export class CloudWorker extends EventEmitter {
     });
     ws.on('error', (e) => this.log.warn('soniox socket error', { sid: s.sid, lane: lane.target, err: e }));
     ws.on('close', () => {
-      if (lane.ws !== ws) return;
-      if (!lane.wsOpen) {
-        // never got going: back off instead of retrying on every audio frame
-        lane.retryAt = performance.now() + lane.backoffMs;
-        lane.backoffMs = Math.min(lane.backoffMs * 2, 15_000);
+      if (lane.closing === ws) {
+        lane.closing = null;
+        this.endLaneUtt(s, lane); // anything said before the close becomes a finished sentence
+        return;
       }
-      this.flushPhrase(s, lane, true);
+      if (lane.ws !== ws) return;
+      if (!lane.healthy) {
+        // never produced results (bad key, quota, network): back off instead of reconnecting per frame
+        lane.retryAt = performance.now() + lane.backoffMs;
+        lane.backoffMs = Math.min(lane.backoffMs * 2, 30_000);
+      }
       if (lane.keepalive) clearInterval(lane.keepalive);
       lane.keepalive = null;
       lane.ws = null;
       lane.wsOpen = false;
+      this.endLaneUtt(s, lane);
     });
   }
 
@@ -461,16 +487,24 @@ export class CloudWorker extends EventEmitter {
     lane.pending = [];
     lane.pendingBytes = 0;
     if (!ws) return;
+    lane.ws = null;
+    lane.wsOpen = false;
     if (graceful && ws.readyState === WebSocket.OPEN) {
-      // empty frame = end of audio; Soniox finalises remaining tokens, then closes
+      // empty frame = end of audio; Soniox finalises remaining words, then closes. New audio for
+      // this lane waits (buffered) until this socket is done, then goes to a fresh socket.
+      lane.closing = ws;
       ws.send('');
       const t = setTimeout(() => ws.terminate(), 3_000);
       t.unref();
     } else {
-      lane.ws = null;
-      lane.wsOpen = false;
       ws.terminate();
     }
+  }
+
+  /** Close the current sentence of a lane (when its socket ends). */
+  private endLaneUtt(s: Stream, lane: Lane): void {
+    this.flushPhrase(s, lane, true);
+    if (lane.utt.original.trim() || lane.utt.text.trim()) this.finishLaneUtt(s, lane);
   }
 
   private closeLanes(s: Stream, graceful: boolean): void {
@@ -490,6 +524,10 @@ export class CloudWorker extends EventEmitter {
   // ------------------------------------------------------------------ tokens
   private onSoniox(s: Stream, lane: Lane, d: Record<string, unknown>): void {
     if (d.error_code) {
+      // the socket is about to close: make sure we wait before trying again (longer for auth/quota)
+      const code = Number(d.error_code);
+      lane.healthy = false;
+      if (code === 401 || code === 402 || code === 403) lane.backoffMs = Math.max(lane.backoffMs, 60_000);
       this.log.error('soniox error', { code: d.error_code, message: d.error_message });
       this.emit('event', { type: 'error', sid: s.sid, message: String(d.error_message), stage: 'stt' });
       if (!s.errorNotified) {
@@ -498,6 +536,7 @@ export class CloudWorker extends EventEmitter {
       }
       return;
     }
+    if (!lane.healthy) { lane.healthy = true; lane.backoffMs = 500; }
     const tokens = (d.tokens as SonioxToken[] | undefined) ?? [];
     if (!tokens.length) return;
     const u = lane.utt;
@@ -519,7 +558,7 @@ export class CloudWorker extends EventEmitter {
       }
       if (!u.firstAt) u.firstAt = performance.now();
       if (!isTr) {
-        if (typeof t.start_ms === 'number' && typeof t.end_ms === 'number' && lane.t0) {
+        if (typeof t.start_ms === 'number' && typeof t.end_ms === 'number' && lane.t0 >= 0) {
           if (!u.absStart) u.absStart = lane.t0 + t.start_ms;
           u.absEnd = Math.max(u.absEnd, lane.t0 + t.end_ms);
         }
@@ -600,7 +639,7 @@ export class CloudWorker extends EventEmitter {
 
   private finishLaneUtt(s: Stream, lane: Lane): void {
     const u = lane.utt;
-    lane.utt = newUtt(lane.nextUtt++);
+    lane.utt = newUtt(s.nextUttId++);
     if (!lane.primary) {
       // A secondary language finished a sentence. Lanes can split sentences differently, so it is
       // matched to the caption by WHEN it was spoken (overlap), never by counting sentences.
@@ -643,7 +682,7 @@ export class CloudWorker extends EventEmitter {
   // ------------------------------------------------------------------ TTS
   private speak(s: Stream, lang: string, text: string): void {
     const elLang = ELEVEN_LANGS[lang];
-    if (!elLang) return;
+    if (!elLang || this.streams.get(s.sid) !== s) return; // speaker left / opted out: don't generate
     const dubId = dubSeq++;
     const ctrl = new AbortController();
     const startedAt = performance.now();
@@ -709,9 +748,14 @@ export class CloudWorker extends EventEmitter {
         voice_settings: { stability: 0.45, similarity_boost: 0.8, use_speaker_boost: true, speed: 1.05 },
       });
       release = await this.ttsSlot(signal); // stay within the ElevenLabs plan's concurrency (else requests fail)
-      const res = await this.fetchWithFirstByteTimeout(url, body, signal);
+      const { res, ctrl } = await this.fetchWithFirstByteTimeout(url, body, signal);
+      // a stream that stalls mid-way is abandoned (else it would hold a slot forever)
+      let stall = setTimeout(() => ctrl.abort(), TTS_STALL_MS);
       let seq = 0;
+      try {
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        clearTimeout(stall);
+        stall = setTimeout(() => ctrl.abort(), TTS_STALL_MS);
         let buf = Buffer.from(chunk);
         if (carry) {
           buf = Buffer.concat([carry, buf]);
@@ -728,6 +772,9 @@ export class CloudWorker extends EventEmitter {
         }
         frames++;
         this.emit('audio', dubId, seq++, buf);
+      }
+      } finally {
+        clearTimeout(stall);
       }
     } catch (e) {
       if (signal.aborted) reason = 'cancelled';
@@ -748,28 +795,34 @@ export class CloudWorker extends EventEmitter {
 
   private async ttsSlot(signal: AbortSignal): Promise<() => void> {
     if (this.ttsActive >= this.o.elevenConcurrency) {
+      // wait for a slot to be handed over (the releaser does not free it in between)
       await new Promise<void>((res, rej) => {
         const go = () => res();
         this.ttsWaiting.push(go);
         signal.addEventListener('abort', () => {
           const i = this.ttsWaiting.indexOf(go);
-          if (i >= 0) this.ttsWaiting.splice(i, 1);
-          rej(new Error('cancelled while queued'));
+          if (i >= 0) { this.ttsWaiting.splice(i, 1); rej(new Error('cancelled while queued')); }
         }, { once: true });
       });
+    } else {
+      this.ttsActive++;
     }
-    this.ttsActive++;
     let done = false;
     return () => {
       if (done) return;
       done = true;
-      this.ttsActive--;
-      this.ttsWaiting.shift()?.();
+      const next = this.ttsWaiting.shift();
+      if (next) next(); // hand the slot straight to the next phrase
+      else this.ttsActive--;
     };
   }
 
-  /** POST to ElevenLabs; if no response headers arrive within TTS_FIRST_BYTE_MS, retry once. */
-  private async fetchWithFirstByteTimeout(url: string, body: string, signal: AbortSignal): Promise<Response> {
+  /**
+   * POST to ElevenLabs. Retries once if nothing arrives within TTS_FIRST_BYTE_MS (and briefly on
+   * 429). The returned controller stays linked to `signal` for the whole stream, so cancelling a
+   * dub stops the download (and the billing) immediately.
+   */
+  private async fetchWithFirstByteTimeout(url: string, body: string, signal: AbortSignal): Promise<{ res: Response; ctrl: AbortController }> {
     for (let attempt = 0; ; attempt++) {
       const ctrl = new AbortController();
       const onAbort = () => ctrl.abort();
@@ -785,17 +838,17 @@ export class CloudWorker extends EventEmitter {
         clearTimeout(timer);
         if (!res.ok || !res.body) {
           const msg = `ElevenLabs HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`;
+          signal.removeEventListener('abort', onAbort);
           if (attempt < 3 && res.status === 429) { await new Promise((r) => setTimeout(r, 120 * (attempt + 1))); continue; } // plan busy: brief wait
           if (attempt === 0 && res.status >= 500) continue;
           throw new Error(msg);
         }
-        return res;
+        return { res, ctrl }; // stays linked to `signal`
       } catch (e) {
         clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
         if (signal.aborted || attempt >= 1) throw e;
         this.log.info('tts slow to start, retrying');
-      } finally {
-        signal.removeEventListener('abort', onAbort);
       }
     }
   }

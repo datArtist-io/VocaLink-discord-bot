@@ -46,6 +46,8 @@ interface DubRoute {
   lang: string;
   userId: string;
   consumers: number;
+  /** personal players were sent this dub's start (so they get its audio and end) */
+  web?: boolean;
   ended: boolean;
   startAt: number;
   uttKey: string;
@@ -219,7 +221,11 @@ export class GuildSession extends EventEmitter {
     this.client.dropStream(sp.sid);
     sp.decoder.destroy();
     this.speakers.delete(userId);
-    this.sidToUser.delete(sp.sid);
+    // their last sentence is still being finished: keep the id -> person mapping for a few seconds
+    const sid = sp.sid;
+    setTimeout(() => { if (!this.speakers.get(userId) || this.speakers.get(userId)!.sid !== sid) this.sidToUser.delete(sid); }, 6_000).unref();
+    this.main.humanSpeaking(userId, false);
+    this.d.hub?.speaking(this.guildId, userId, false);
   }
 
   attachMirror(lang: string, link: VoiceLinkLike): void {
@@ -250,7 +256,7 @@ export class GuildSession extends EventEmitter {
     if (!d) return [];
     // 'auto' = the group's main language (first server language). Speakers of other languages
     // are spoken in it; speech already in it stays silent. Everyone else uses /listen.
-    if (d === 'auto') return this.settings.textTargets.slice(0, 1);
+    if (d === 'auto' || !this.settings.textTargets.includes(d)) return this.settings.textTargets.slice(0, 1);
     return [d];
   }
 
@@ -308,6 +314,7 @@ export class GuildSession extends EventEmitter {
     const onStatus = (s: string) => {
       if (s === 'down') {
         // in-flight dubs will never finish, and dub ids restart on the new connection
+        for (const [id, r] of this.dubs) if (r.web) this.d.hub?.dubEnd(this.guildId, r.lang, id, r.userId);
         this.dubs.clear();
         this.main.clear();
         for (const m of this.mirrors.values()) m.sched.clear();
@@ -348,13 +355,20 @@ export class GuildSession extends EventEmitter {
       m = { name: '…', bot: false };
       void this.d.fetchMember(userId).then((info) => {
         const sp = this.speakers.get(userId);
-        if (!info || info.bot) this.dropUser(userId);
+        if (!info || info.bot) { this.main.humanSpeaking(userId, false); this.d.hub?.speaking(this.guildId, userId, false); this.dropUser(userId); }
         else if (sp) sp.name = info.name;
       });
     }
+    if (!speaking) {
+      // always clear, so nobody (or a bot) can leave dubs stuck at low volume
+      this.main.humanSpeaking(userId, false);
+      this.d.hub?.speaking(this.guildId, userId, false);
+    }
     if (!m || m.bot) return;
-    this.main.humanSpeaking(userId, speaking);
-    this.d.hub?.speaking(this.guildId, userId, speaking);
+    if (speaking) {
+      this.main.humanSpeaking(userId, true);
+      this.d.hub?.speaking(this.guildId, userId, true);
+    }
     if (speaking) {
       if (this.d.store.optedOut(userId) && !this.enrollTaps.has(userId)) return;
       this.ensureSpeaker(userId, m);
@@ -562,10 +576,10 @@ export class GuildSession extends EventEmitter {
     // tier notices (once per language per session)
     for (const [lang, tier] of Object.entries(e.tiers)) {
       const k = `${lang}:${tier}`;
-      if (tier >= 2 || this.tierNoticeShown.has(k)) continue;
+      if (tier === 1 || tier === 2 || this.tierNoticeShown.has(k)) continue;
       this.tierNoticeShown.add(k);
       const reasons = this.client.info?.languages?.[lang]?.reasons ?? [];
-      this.d.captions?.notice(formatTierNotice(lang, tier, reasons));
+      if (this.settings.captions !== false) this.d.captions?.notice(formatTierNotice(lang, tier, reasons));
       this.d.hub?.notice(this.guildId, formatTierNotice(lang, tier, reasons));
     }
     // analytics (no text)
@@ -611,11 +625,11 @@ export class GuildSession extends EventEmitter {
 
   private onNotice(e: NoticeEvent): void {
     this.d.metrics.inc(`notice_${e.code}`);
-    if (e.code === 'stt_unavailable' || e.code === 'tts_unavailable') this.notice(`ℹ️ ${e.message}`, e.code);
+    if (['stt_unavailable', 'tts_unavailable', 'stt_error', 'too_many_langs'].includes(e.code)) this.notice(`ℹ️ ${e.message}`, e.code);
   }
 
   private notice(text: string, _kind: string): void {
-    this.d.captions?.notice(text);
+    if (this.settings.captions !== false) this.d.captions?.notice(text);
     this.d.hub?.notice(this.guildId, text);
   }
 
@@ -635,6 +649,7 @@ export class GuildSession extends EventEmitter {
     }
     if (this.webLangs.includes(e.lang)) {
       route.consumers++; // web listeners never cancel
+      route.web = true;
       this.d.hub?.dubStart(this.guildId, e.lang, { dub_id: e.dub_id, user_id: e.user_id, text: e.text, voice: e.voice });
     }
     if (route.consumers === 0) {
@@ -649,7 +664,7 @@ export class GuildSession extends EventEmitter {
     if (!r) return;
     if (this.mainDubLangs().includes(r.lang)) this.main.push(dubId, pcm);
     this.mirrors.get(r.lang)?.sched.push(dubId, pcm);
-    if (this.webLangs.includes(r.lang)) this.d.hub?.dubAudio(this.guildId, r.lang, dubId, seq, pcm);
+    if (r.web) this.d.hub?.dubAudio(this.guildId, r.lang, dubId, seq, pcm, r.userId);
   }
 
   private onTtsEnd(e: TtsEndEvent): void {
@@ -658,8 +673,8 @@ export class GuildSession extends EventEmitter {
     r.ended = true;
     this.main.end(e.dub_id);
     this.mirrors.get(r.lang)?.sched.end(e.dub_id);
-    if (this.webLangs.includes(r.lang)) {
-      this.d.hub?.dubEnd(this.guildId, r.lang, e.dub_id);
+    if (r.web) {
+      this.d.hub?.dubEnd(this.guildId, r.lang, e.dub_id, r.userId);
       this.releaseDub(e.dub_id);
     }
   }

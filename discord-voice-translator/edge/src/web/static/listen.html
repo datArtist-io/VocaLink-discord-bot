@@ -96,6 +96,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   let ws = null, ctx = null, master = null, duck = null;
   let playhead = 0;
   let fails = 0;
+  let updatePending = false;
   const dubs = new Map();            // dub id -> { user, arrived, skip, started }
   const people = new Map();          // user id -> { name, el }
   const muted = new Set();
@@ -175,59 +176,102 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       duck = ctx.createGain(); master = ctx.createGain();
       duck.connect(master); master.connect(ctx.destination);
-      master.gain.value = (Number(q.get('vol')) || Number($('vol').value)) / 100;
+      master.gain.value = Number($('vol').value) / 100;
     }
     await ctx.resume();
     $('startOv').classList.add('hide');
+    if (updatePending) { location.reload(); return; }   // apply a pending update on this tap
+    ctx.onstatechange = () => { if (ctx.state !== 'running') $('startOv').classList.remove('hide'); };
     try { await navigator.wakeLock?.request('screen'); } catch {}
   }
   $('startBtn').onclick = startAudio;
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible') return;
+    try { await navigator.wakeLock?.request('screen'); } catch {}       // browsers drop it when hidden
+    if (ctx && ctx.state !== 'running') { try { await ctx.resume(); } catch {} if (ctx.state !== 'running') $('startOv').classList.remove('hide'); }
+  });
   $('vol').oninput = () => { if (master) master.gain.setTargetAtTime($('vol').value / 100, ctx.currentTime, 0.05); };
 
-  // Each translated phrase is buffered briefly (~150 ms) and then played as one continuous,
-  // gap-free stream with soft edges. Starting on the first tiny network chunk caused gaps
-  // whenever the next chunk was a few ms late, which sounds choppy / robotic.
-  const SR = 48000, PREBUFFER_S = 0.15, FADE_S = 0.006;
+  // Translations play ONE AT A TIME, in the order they started. Each is buffered briefly
+  // (~150 ms) and then played as one continuous, gap-free stream with soft edges. Two people
+  // talking close together are queued, never chopped into each other.
+  const SR = 48000, PREBUFFER_S = 0.15, FADE_S = 0.006, NO_DATA_S = 3;
+  const queue = [];                  // dub ids, in start order
+  function fresh(id, user, rate) {
+    return { id, user, rate: rate || SR, chunks: [], buffered: 0, started: false, ended: false, skip: false, first: true, lastData: performance.now() };
+  }
   function dubFor(id) {
     let d = dubs.get(id);
-    if (!d) { d = { user: null, skip: false, started: false, ended: false, pending: [], buffered: 0, first: true }; dubs.set(id, d); }
+    if (!d) { d = fresh(id, null, SR); dubs.set(id, d); queue.push(id); }
     return d;
   }
   function schedule(d, f, last) {
     const now = ctx.currentTime;
     if (playhead < now + 0.02) playhead = now + 0.05;      // underrun: tiny re-buffer instead of a hard cut
-    if (d.first) { for (let i = 0, n = Math.min(f.length, FADE_S * SR); i < n; i++) f[i] *= i / n; d.first = false; }
-    if (last) { const n = Math.min(f.length, FADE_S * SR); for (let i = 0; i < n; i++) f[f.length - 1 - i] *= i / n; }
-    const b = ctx.createBuffer(1, f.length, d.rate || SR); b.copyToChannel(f, 0);
+    if (d.first) { for (let i = 0, n = Math.min(f.length, FADE_S * d.rate); i < n; i++) f[i] *= i / n; d.first = false; }
+    if (last) { const n = Math.min(f.length, FADE_S * d.rate); for (let i = 0; i < n; i++) f[f.length - 1 - i] *= i / n; }
+    const b = ctx.createBuffer(1, f.length, d.rate); b.copyToChannel(f, 0);
     const s = ctx.createBufferSource(); s.buffer = b; s.connect(duck);
     s.start(playhead); playhead += b.duration;
   }
-  function begin(d) {
-    const now = ctx.currentTime;
-    if (playhead - now > STALE_S) { d.skip = true; d.pending = []; return; }   // too far behind: skip, stay live
-    d.started = true;
-    if (playhead < now + 0.03) playhead = now + 0.03;
-    const all = d.pending; d.pending = [];
-    // join the buffered pieces into one block so they play seamlessly
-    const total = all.reduce((n, x) => n + x.length, 0); const f = new Float32Array(total); let o = 0;
-    for (const x of all) { f.set(x, o); o += x.length; }
-    if (total) schedule(d, f, d.ended);
+  function takeAll(d) {
+    const total = d.chunks.reduce((n, x) => n + x.length, 0); const f = new Float32Array(total); let o = 0;
+    for (const x of d.chunks) { f.set(x, o); o += x.length; }
+    d.chunks = []; return f;
   }
-  function onAudio(buf) {
+  function finish(d) {
+    queue.shift();
+    const id = d.id;
+    setTimeout(() => { if (dubs.get(id) === d) dubs.delete(id); }, 10000);
+  }
+  // play whatever the head of the queue can play now; move on when it's done
+  function pump() {
     if (!ctx || ctx.state !== 'running') return;
+    while (queue.length) {
+      const d = dubs.get(queue[0]);
+      if (!d) { queue.shift(); continue; }
+      if (d.skip || muted.has(d.user)) { d.skip = true; finish(d); continue; }
+      const idle = (performance.now() - d.lastData) / 1000;
+      if (!d.started) {
+        if (d.buffered < PREBUFFER_S && !d.ended && idle < NO_DATA_S) return;   // still buffering
+        if (!d.chunks.length) { finish(d); continue; }                         // ended / stalled with nothing
+        if (playhead - ctx.currentTime > STALE_S) { d.skip = true; finish(d); continue; } // too far behind: stay live
+        if (playhead < ctx.currentTime + 0.03) playhead = ctx.currentTime + 0.03;
+        d.started = true;
+        schedule(d, takeAll(d), d.ended);
+      } else if (d.chunks.length) {
+        schedule(d, takeAll(d), d.ended);
+      }
+      if (d.ended || idle >= NO_DATA_S) { finish(d); continue; }                // done: next translation
+      return;                                                                    // head still streaming
+    }
+  }
+  setInterval(pump, 100);
+  function onAudio(buf) {
+    if (!ctx || ctx.state !== 'running') return;   // not listening yet: don't pile audio up
     const dv = new DataView(buf); const d = dubFor(dv.getUint32(0));
-    if (d.skip || muted.has(d.user)) return;
+    if (d.skip) return;
     const pcm = new Int16Array(buf, 8); const f = new Float32Array(pcm.length);
     for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
-    if (d.started) { schedule(d, f, false); return; }
-    d.pending.push(f); d.buffered += f.length / (d.rate || SR);
-    if (d.buffered >= PREBUFFER_S) begin(d);
+    d.chunks.push(f); d.buffered += f.length / d.rate; d.lastData = performance.now();
+    pump();
+  }
+  function startDub(m) {
+    if (!ctx || ctx.state !== 'running') return;
+    // always a fresh entry: ids can repeat after a reconnect
+    const old = dubs.get(m.dub_id);
+    if (old) { const i = queue.indexOf(m.dub_id); if (i >= 0) queue.splice(i, 1); }
+    dubs.set(m.dub_id, fresh(m.dub_id, m.user_id, m.sample_rate));
+    queue.push(m.dub_id);
   }
   function endDub(id) {
     const d = dubs.get(id); if (!d) return;
-    d.ended = true;
-    if (!d.started && !d.skip && ctx && ctx.state === 'running' && d.pending.length) begin(d);  // short phrase: play what we have
-    setTimeout(() => dubs.delete(id), 10000);
+    d.ended = true; pump();
+  }
+  function resetPlayback() {
+    dubs.clear(); queue.length = 0;
+    if (duck && ctx) duck.gain.setTargetAtTime(1, ctx.currentTime, 0.05);
+    for (const p of people.values()) p.el.classList.remove('talking');
   }
 
   function speaking(m) {
@@ -245,7 +289,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}&v=3`);
     ws.binaryType = 'arraybuffer';
     let opened = false;
-    ws.onopen = () => { opened = true; fails = 0; state('Connecting…'); if ($('self').checked) ws.send(JSON.stringify({ type: 'hear_self', on: true })); };
+    ws.onopen = () => { opened = true; fails = 0; resetPlayback(); state('Connecting…'); if ($('self').checked) ws.send(JSON.stringify({ type: 'hear_self', on: true })); };
     ws.onclose = async () => {
       if (!opened && ++fails >= 2) {
         // couldn't connect twice: is the link still valid?
@@ -259,16 +303,30 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
   }
   function onJson(m) {
-    if (m.type === 'build') { if (m.id !== BUILD) location.reload(); return; }   // VocaLink was updated: load the new player
+    if (m.type === 'build') {
+      // VocaLink was updated. Reloading would need a new tap to restart audio, so never do it
+      // while you're listening: reload only if audio hasn't started yet (or on your next tap).
+      if (m.id !== BUILD) { if (!ctx || ctx.state !== 'running') location.reload(); else updatePending = true; }
+      return;
+    }
     if (m.type === 'status') {
       state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
-      if (m.lang && m.lang !== lang) { lang = m.lang; try { localStorage.setItem('vl_lang', lang); } catch {} $('mylang').textContent = `${flag(lang)} ${langName(lang)}`; }
+      if (m.lang && m.lang !== lang) {
+        lang = m.lang; try { localStorage.setItem('vl_lang', lang); } catch {}
+        $('mylang').textContent = `${flag(lang)} ${langName(lang)}`;
+        const u = new URL(location.href); u.searchParams.set('lang', lang); history.replaceState(null, '', u);  // a reload keeps it
+        resetPlayback();
+      }
+      if (!m.live) resetPlayback();
     }
     else if (m.type === 'caption') caption(m);
-    else if (m.type === 'dub_start') { const d = dubFor(m.dub_id); d.user = m.user_id; d.rate = m.sample_rate || 48000; }
+    else if (m.type === 'dub_start') startDub(m);
     else if (m.type === 'dub_end') endDub(m.dub_id);
     else if (m.type === 'speaking') speaking(m);
-    else if (m.type === 'volume') { $('vol').value = m.value; if (master) master.gain.setTargetAtTime(m.value / 100, ctx.currentTime, 0.05); }
+    else if (m.type === 'volume') {
+      $('vol').value = m.value; if (master) master.gain.setTargetAtTime(m.value / 100, ctx.currentTime, 0.05);
+      const u = new URL(location.href); u.searchParams.set('vol', m.value); history.replaceState(null, '', u);
+    }
   }
 
   if (q.get('vol')) $('vol').value = q.get('vol');

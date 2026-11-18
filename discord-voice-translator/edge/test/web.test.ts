@@ -65,8 +65,8 @@ test('web server: health, pages, dashboard auth, listener websocket', async () =
     hub.caption('g1', { name: 'Ada', userId: 'u2', srcLang: 'en', original: 'hi', translations: { yo: 'ẹ n lẹ' }, final: true, uttKey: '1:1' });
     hub.dubStart('g1', 'yo', { dub_id: 7, user_id: 'u2' });
     const pcm48 = Buffer.alloc(1920);
-    hub.dubAudio('g1', 'yo', 7, 0, pcm48);
-    hub.dubAudio('g1', 'fr', 8, 0, pcm48); // other language: not delivered
+    hub.dubAudio('g1', 'yo', 7, 0, pcm48, 'u2');
+    hub.dubAudio('g1', 'fr', 8, 0, pcm48, 'u2'); // other language: not delivered
     await new Promise((r) => setTimeout(r, 100));
     const cap = msgs.find((m) => m.type === 'caption')!;
     assert.equal(cap.text, 'ẹ n lẹ');

@@ -138,7 +138,8 @@ export class TranslatorBot {
       this.d.log.error('interaction failed', { err: e });
       if (i.isRepliable()) {
         const content = `⚠️ ${(e as Error).message ?? 'Something went wrong.'}`;
-        if (i.deferred || i.replied) await i.followUp({ content, flags: EPH }).catch(() => {});
+        if (i.deferred && !i.replied) await i.editReply({ content, embeds: [], components: [] }).catch(() => {});
+        else if (i.replied) await i.followUp({ content, flags: EPH }).catch(() => {});
         else await i.reply({ content, flags: EPH }).catch(() => {});
       }
     }
@@ -156,9 +157,11 @@ export class TranslatorBot {
   }
 
   // ------------------------------------------------------------------ /translate
+  private starting = new Set<string>();
+
   private async cmdStart(i: ChatInputCommandInteraction): Promise<void> {
     const guild = i.guild!;
-    if (this.sessions.has(guild.id)) {
+    if (this.sessions.has(guild.id) || this.starting.has(guild.id)) {
       await i.reply({ content: 'Already translating in this server. Use `/translate stop` first.', flags: EPH });
       return;
     }
@@ -179,6 +182,15 @@ export class TranslatorBot {
       await i.reply({ content: '⚠️ The translation worker is not reachable right now. Try again in a moment.', flags: EPH });
       return;
     }
+    this.starting.add(guild.id);
+    try {
+      await this.startSession(i, guild, vc);
+    } finally {
+      this.starting.delete(guild.id);
+    }
+  }
+
+  private async startSession(i: ChatInputCommandInteraction, guild: Guild, vc: NonNullable<GuildMember['voice']['channel']>): Promise<void> {
     await i.deferReply();
     const dubOpt = i.options.getString('dub');
     if (dubOpt) {
@@ -210,6 +222,7 @@ export class TranslatorBot {
       await link.connect();
     } catch (e) {
       link.destroy();
+      if (captionsChannel.id !== textChannel.id && 'delete' in captionsChannel) await (captionsChannel as { delete(): Promise<unknown> }).delete().catch(() => {});
       throw new Error(`Could not join ${vc.name}: ${(e as Error).message}`);
     }
     link.on('dave', (info: Record<string, unknown>) => {
@@ -338,11 +351,16 @@ export class TranslatorBot {
     if (!a) return;
     this.sessions.delete(guildId);
     if (a.leaveTimer) clearTimeout(a.leaveTimer);
-    const summary = await a.session.stop({ summary: true });
-    if (summary && (summary as { ok?: boolean }).ok) await this.postSummary(a.captionsChannel, summary);
-    await a.captionsChannel.send({ content: `⏹️ Translation ended (${reason}).`, allowedMentions: { parse: [] } }).catch(() => {});
-    const guild = this.d.client.guilds.cache.get(guildId);
-    if (guild && this.d.mirrors) await this.d.mirrors.cleanup(guild);
+    try {
+      const summary = await a.session.stop({ summary: true });
+      if (summary && (summary as { ok?: boolean }).ok) await this.postSummary(a.captionsChannel, summary);
+    } catch (e) {
+      this.d.log.warn('stopping the session hit an error', { err: e });
+    } finally {
+      await a.captionsChannel.send({ content: `⏹️ Translation ended (${reason}).`, allowedMentions: { parse: [] } }).catch(() => {});
+      const guild = this.d.client.guilds.cache.get(guildId);
+      if (guild && this.d.mirrors) await this.d.mirrors.cleanup(guild).catch(() => {});
+    }
     this.d.log.info('session stopped', { guild: guildId, reason });
   }
 
@@ -426,7 +444,7 @@ export class TranslatorBot {
 
   private async cmdOpt(i: ChatInputCommandInteraction, out: boolean): Promise<void> {
     this.d.store.updateUser(i.user.id, { optout: out });
-    if (out) await this.d.voiceBank?.remove(i.user.id); // their cloned voice is deleted too
+    if (out) void this.d.voiceBank?.remove(i.user.id).catch(() => {}); // their cloned voice is deleted too (in the background)
     if (out) for (const a of this.sessions.values()) a.session.dropUser(i.user.id); // every server, immediately
     await i.reply({
       content: out
@@ -726,18 +744,26 @@ export class TranslatorBot {
   private async cmdListen(i: ChatInputCommandInteraction): Promise<void> {
     const langOpt = i.options.getString('lang');
     const lang = langOpt ? normalizeLang(langOpt) : null;
-    if (lang && lang !== 'auto') this.d.store.updateUser(i.user.id, { hearLang: lang });
+    if (langOpt && (!lang || lang === 'auto')) {
+      await i.reply({ content: `I don't know the language "${langOpt.slice(0, 50)}". Try a name like "French" or a code like "fr".`, flags: EPH });
+      return;
+    }
+    if (lang) this.d.store.updateUser(i.user.id, { hearLang: lang });
     await this.replyTranslator(i, lang && lang !== 'auto' ? lang : null);
   }
 
   /** The personal translator, in Discord: a language dropdown (with flags) + an Open button. Only you see it. */
   private translatorPanel(guildId: string, userId: string) {
     const hear = this.d.store.getUser(userId).hearLang;
-    const lang = hear && (PANEL_LANGS as readonly string[]).includes(hear) ? hear : null;
+    const lang = hear && hear !== 'auto' ? hear : null; // any language works; the menu shows the 25 most common
     const select = new StringSelectMenuBuilder()
       .setCustomId('listen:lang')
       .setPlaceholder('🌐 Choose the language you want to hear')
-      .addOptions(PANEL_LANGS.map((l) => ({ label: langLabel(l).replace(/^\S+\s/, ''), value: l, emoji: flag(l), default: l === lang })));
+      .addOptions([
+        // a language chosen with /listen that isn't in the top-25 list is shown first
+        ...(lang && !(PANEL_LANGS as readonly string[]).includes(lang) ? [{ label: languageName(lang), value: lang, emoji: '🌐', default: true }] : []),
+        ...PANEL_LANGS.slice(0, lang && !(PANEL_LANGS as readonly string[]).includes(lang) ? 24 : 25).map((l) => ({ label: langLabel(l).replace(/^\S+\s/, ''), value: l, emoji: flag(l), default: l === lang })),
+      ]);
     const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)];
     const vol = this.volumeOf(userId);
     rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -803,7 +829,7 @@ export class TranslatorBot {
     const vb = this.d.voiceBank;
     if (!vb) return;
     if (i.isButton()) {
-      await vb.remove(i.user.id); // deletes the clone at ElevenLabs right away
+      void vb.remove(i.user.id).catch(() => {}); // deletes the clone at ElevenLabs (reply doesn't wait for it)
     } else {
       const v = i.values[0] ?? 'auto';
       // choosing "My own voice" is the person's own explicit consent to a voice clone
@@ -815,7 +841,7 @@ export class TranslatorBot {
 
   private async onTranslatorLang(i: StringSelectMenuInteraction): Promise<void> {
     const l = i.values[0];
-    if (l && (PANEL_LANGS as readonly string[]).includes(l)) {
+    if (l && normalizeLang(l) === l && l !== 'auto') {
       this.d.store.updateUser(i.user.id, { hearLang: l });
       this.d.hub.setUserLang(i.guildId!, i.user.id, l); // an open player switches instantly
     }
@@ -862,7 +888,9 @@ export class TranslatorBot {
     if (!a) return;
     const botId = this.d.client.user!.id;
     if (n.id === botId && !n.channelId) {
-      void this.stop(n.guild.id, 'bot was disconnected');
+      // the voice link reconnects itself (it leaves and rejoins): that's not a disconnect
+      if ((a.link as unknown as { rejoining?: boolean }).rejoining) return;
+      void this.stop(n.guild.id, 'bot was disconnected').catch((e) => this.d.log.warn('stop failed', { err: e }));
       return;
     }
     if (o.channelId === a.link.channelId && n.channelId !== a.link.channelId) a.session.dropUser(n.id);

@@ -123,14 +123,14 @@ export class Store {
   getSettings(guildId: string): GuildSettings {
     const r = this.db.prepare('SELECT json FROM guild_settings WHERE guild_id = ?').get(guildId) as { json: string } | undefined;
     const stored = r ? (JSON.parse(r.json) as Partial<GuildSettings> & { v?: number }) : {};
-    if ((stored.v ?? 1) < SETTINGS_VERSION) {
+    if ((stored.v ?? 1) < 2) {
       // values that were only the old defaults (nobody chose them) move to the new defaults
       if (stored.dubLang === null) delete stored.dubLang;
       if (JSON.stringify(stored.textTargets) === '["en"]') delete stored.textTargets;
       if (stored.summaries === true) delete stored.summaries;
       if (stored.expectedLangs === null) delete stored.expectedLangs;
     }
-    if ((stored.v ?? 1) < 3 && stored.dubLang === 'auto') delete stored.dubLang; // old default, not a choice
+    if (stored.v === 2 && stored.dubLang === 'auto') delete stored.dubLang; // v2's default, not a choice
     delete stored.v;
     return { ...DEFAULT_SETTINGS, ...stored };
   }

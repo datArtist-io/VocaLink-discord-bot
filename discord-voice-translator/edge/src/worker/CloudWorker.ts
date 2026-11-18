@@ -42,9 +42,9 @@ const ELEVEN_LANGS: Record<string, string> = {
 };
 
 const PHRASE_END = /[.!?,;:。！？、]\s*$/;
-const MIN_WORDS_TO_SPEAK = 4;
-const MAX_LANGS = 3; // server languages (one Soniox lane per language per speaker)
-const PHRASE_TIMEOUT_MS = 300;
+const MAX_LANGS = 3;
+/** Everyday chat / gaming words that recognisers often get wrong. */
+const CHAT_TERMS = ['Discord', 'ranked', 'GG', 'AFK', 'lag', 'carry', 'noob', 'pare', 'lods', 'bro', 'sis', 'bes', 'tol', 'petmalu', 'charot', 'sana all', 'Valorant', 'Mobile Legends', 'Minecraft', 'Roblox']; // server languages (one Soniox lane per language per speaker)
 const IDLE_CLOSE_MS = 10 * 60_000; // keep each speaker's line open between turns so the next one starts instantly
 const TTS_FIRST_BYTE_MS = 3_000; // a dub that hasn't started by now is retried once
 const WARM_EVERY_MS = 45_000;
@@ -92,6 +92,7 @@ interface Utt {
   text: string; // this lane's target text: translations into it + words already in it
   phrase: { text: string; translated: boolean }; // not yet spoken
   translatedInto: boolean; // part of this utterance needed translating into the target
+  lastWasTr: boolean;
   firstAt: number;
 }
 
@@ -324,6 +325,19 @@ export class CloudWorker extends EventEmitter {
     return all.slice(0, MAX_LANGS);
   }
 
+  /** What the conversation is, and the names / words to listen for: improves recognition and translation. */
+  private context(s: Stream): Record<string, unknown> {
+    const names = new Set<string>();
+    for (const x of this.streams.values()) if (x.guildId === s.guildId && x.name && x.name !== '…') names.add(x.name);
+    return {
+      general: [
+        { key: 'domain', value: 'Casual live voice chat between friends on Discord, often while gaming' },
+        { key: 'style', value: 'Spoken, informal; people mix languages mid-sentence (e.g. Taglish)' },
+      ],
+      terms: [...names, ...CHAT_TERMS].slice(0, 100),
+    };
+  }
+
   private hints(s: Stream, targets: string[]): string[] {
     if (s.speakLang && s.speakLang !== 'auto') return [s.speakLang];
     const g = this.guilds.get(s.guildId);
@@ -379,6 +393,7 @@ export class CloudWorker extends EventEmitter {
           enable_language_identification: true,
           enable_endpoint_detection: true,
           client_reference_id: `g${s.guildId}-s${s.sid}-${lane.target ?? 'stt'}`,
+          context: this.context(s),
           ...(lane.target ? { translation: { type: 'one_way', target_language: lane.target } } : {}),
         }));
         lane.wsOpen = true;
@@ -495,8 +510,12 @@ export class CloudWorker extends EventEmitter {
       }
       // target text = translations into the target + original words already in it (Taglish passthrough)
       if (inTarget) {
-        u.text += t.text;
-        u.phrase.text += t.text;
+        // where the text switches between original words and translated words, Soniox may not
+        // put a space between them ("internet ko" + "sobrang" -> "internet kosobrang"): add one
+        const piece = joinPiece(u.text, t.text, isTr !== u.lastWasTr && u.text.length > 0);
+        u.lastWasTr = isTr;
+        u.text += piece;
+        u.phrase.text += joinPiece(u.phrase.text, t.text, piece !== t.text && u.phrase.text.length > 0);
         if (isTr) {
           u.phrase.translated = true;
           u.translatedInto = true;
@@ -523,12 +542,10 @@ export class CloudWorker extends EventEmitter {
       }
     }
 
-    if (ended) {
-      this.flushPhrase(s, lane, true);
-      this.finishLaneUtt(s, lane);
-    } else if (gotFinal) {
-      this.flushPhrase(s, lane, false);
-    }
+    // Soniox delivers each translated phrase complete in one message, so speak it right away:
+    // waiting for more words only adds delay.
+    if (gotFinal || ended) this.flushPhrase(s, lane, true);
+    if (ended) this.finishLaneUtt(s, lane);
   }
 
   /**
@@ -552,16 +569,11 @@ export class CloudWorker extends EventEmitter {
     const p = u.phrase;
     const text = p.text.trim();
     if (!text || !lane.target) return;
-    const words = text.split(/\s+/).length;
-    if (force || PHRASE_END.test(text) || words >= MIN_WORDS_TO_SPEAK) {
-      // speak if any part of this utterance needed translating (keeps the English words of a
-      // Taglish sentence inside an English dub), into the right language for this speaker
-      if ((p.translated || u.translatedInto) && this.shouldSpeak(s, lane.target, topLang(u))) this.speak(s, lane.target, text);
-      u.phrase = { text: '', translated: false };
-    } else {
-      lane.phraseTimer = setTimeout(() => this.flushPhrase(s, lane, true), PHRASE_TIMEOUT_MS);
-      lane.phraseTimer.unref();
-    }
+    // speak if any part of this utterance needed translating (keeps the English words of a
+    // Taglish sentence inside an English dub), into the right language for this speaker
+    if (/[\p{L}\p{N}]/u.test(text) && (p.translated || u.translatedInto) && this.shouldSpeak(s, lane.target, topLang(u))) this.speak(s, lane.target, text);
+    u.phrase = { text: '', translated: false };
+    void force;
   }
 
   private finishLaneUtt(s: Stream, lane: Lane): void {
@@ -791,7 +803,7 @@ interface SonioxToken {
 }
 
 function newUtt(id: number): Utt {
-  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, firstAt: 0 };
+  return { id, original: '', langCount: new Map(), confSum: 0, confN: 0, text: '', phrase: { text: '', translated: false }, translatedInto: false, lastWasTr: false, firstAt: 0 };
 }
 
 function topLang(u: Utt): string | null {
@@ -805,4 +817,11 @@ function hashStr(x: string): number {
   let h = 2166136261;
   for (let i = 0; i < x.length; i++) h = Math.imul(h ^ x.charCodeAt(i), 16777619);
   return h >>> 0;
+}
+
+/** Text to append so that two runs of words never fuse (adds a space only where one is missing). */
+export function joinPiece(prev: string, next: string, boundary: boolean): string {
+  if (!boundary || !prev || !next) return next;
+  if (/\s$/.test(prev) || /^[\s.,!?;:)\]}'’"…-]/.test(next)) return next;
+  return ' ' + next;
 }

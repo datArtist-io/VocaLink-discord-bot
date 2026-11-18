@@ -100,6 +100,9 @@ async function main(): Promise<void> {
   process.on('unhandledRejection', (e) => log.error('unhandled rejection', { err: e }));
 
   await client.login(cfg.discordToken);
+
+  // one-off latency benchmark on the real host (set BENCH=1, read the logs, then remove it)
+  if (process.env.BENCH === '1') void import('./bench.js').then((m) => m.runBench(log.child('bench'))).catch((e) => log.error('bench crashed', { err: e }));
 }
 
 main().catch((e) => {

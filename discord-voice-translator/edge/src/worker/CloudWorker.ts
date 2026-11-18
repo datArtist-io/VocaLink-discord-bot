@@ -27,6 +27,7 @@ import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
 
 import { Agc } from '../audio/Agc.js';
+import { PitchTracker } from '../audio/Pitch.js';
 import type { Json } from '../protocol/frames.js';
 import type { HelloAck, LanguageInfo } from '../protocol/messages.js';
 import { languageName } from '../languages.js';
@@ -43,7 +44,16 @@ const ELEVEN_LANGS: Record<string, string> = {
 const PHRASE_END = /[.!?,;:。！？、]\s*$/;
 const MIN_WORDS_TO_SPEAK = 4;
 const PHRASE_TIMEOUT_MS = 300;
-const IDLE_CLOSE_MS = 120_000;
+const IDLE_CLOSE_MS = 10 * 60_000; // keep each speaker's line open between turns so the next one starts instantly
+const TTS_FIRST_BYTE_MS = 3_000; // a dub that hasn't started by now is retried once
+const WARM_EVERY_MS = 45_000;
+
+/** House voices (ElevenLabs default library), split by pitch so a dub matches its speaker. */
+export const DEFAULT_VOICES = {
+  low: ['JBFqnCBsd6RMkjVDRZzb', 'TX3LPaxmHKxFdv7VOQHJ', 'cjVigY5qzO86Huf0OWal'], // George, Liam, Eric
+  high: ['EXAVITQu4vr4xnSDxMaL', 'FGY2WhTYpPnrIDTdsKH5', 'XrExE9yKIg1WjnnlVkGX', 'cgSgspJ2msm6clMCkdW9', 'pFZP5JQG7iQjIQuC4Bku'], // Sarah, Laura, Matilda, Jessica, Lily
+};
+const PITCH_SPLIT_HZ = 165;
 const KEEPALIVE_MS = 8_000;
 const MAX_PENDING_AUDIO_BYTES = 32_000 * 5; // 5 s at 16 kHz s16 while the socket opens
 
@@ -53,7 +63,9 @@ export interface CloudWorkerOptions {
   sonioxUrl?: string;
   sonioxModel?: string;
   elevenKey: string;
+  /** Force one voice for everyone (otherwise each speaker gets their own). */
   elevenVoiceId?: string;
+  voices?: { low: string[]; high: string[] };
   elevenModel?: string;
   elevenBaseUrl?: string;
   defaultLangs?: string[];
@@ -90,6 +102,8 @@ interface Stream {
   wsOpen: boolean;
   sig: string;
   agc: Agc;
+  pitch: PitchTracker;
+  lastSaid: Map<string, string>; // per language: previous dubbed phrase, for smooth continuous delivery
   pending: Buffer[];
   pendingBytes: number;
   lastAudioAt: number;
@@ -123,7 +137,10 @@ export class CloudWorker extends EventEmitter {
   private replayers = new Set<() => Json[]>();
   private sweeper: NodeJS.Timeout | null = null;
   private readonly log: Logger;
-  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent'>> & { wsAgent?: import('node:http').Agent };
+  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent' | 'elevenVoiceId'>> & { wsAgent?: import('node:http').Agent; elevenVoiceId?: string };
+  /** guildId -> userId -> voice id (stable for the whole call) */
+  private voiceOf = new Map<string, Map<string, string>>();
+  private lastWarm = 0;
 
   constructor(opts: CloudWorkerOptions) {
     super();
@@ -132,7 +149,8 @@ export class CloudWorker extends EventEmitter {
       sonioxUrl: opts.sonioxUrl ?? 'wss://stt-rt.soniox.com/transcribe-websocket',
       sonioxModel: opts.sonioxModel ?? 'stt-rt-v6',
       elevenKey: opts.elevenKey,
-      elevenVoiceId: opts.elevenVoiceId ?? 'JBFqnCBsd6RMkjVDRZzb',
+      elevenVoiceId: opts.elevenVoiceId,
+      voices: opts.voices ?? DEFAULT_VOICES,
       elevenModel: opts.elevenModel ?? 'eleven_flash_v2_5',
       elevenBaseUrl: (opts.elevenBaseUrl ?? 'https://api.elevenlabs.io').replace(/\/$/, ''),
       defaultLangs: opts.defaultLangs ?? ['tl', 'en'],
@@ -147,6 +165,7 @@ export class CloudWorker extends EventEmitter {
 
   // ------------------------------------------------------------------ lifecycle (WorkerClient API)
   start(): void {
+    this.warm();
     this.info = this.helloAck();
     this.status = 'ready';
     this.stats.connects++;
@@ -195,6 +214,8 @@ export class CloudWorker extends EventEmitter {
         if (s) {
           this.closeSession(s, true);
           this.streams.delete(s.sid);
+          // call over for this server: free its voices for the next call
+          if (![...this.streams.values()].some((x) => x.guildId === s.guildId)) this.voiceOf.delete(s.guildId);
         }
         break;
       }
@@ -211,6 +232,7 @@ export class CloudWorker extends EventEmitter {
     const s = this.streams.get(sid);
     if (!s) return;
     const pcm = s.agc.process(raw); // lift faint speakers before recognition
+    s.pitch.push(pcm);
     s.lastAudioAt = performance.now();
     if (!s.ws && s.lastAudioAt >= s.retryAt) this.openSession(s);
     if (s.wsOpen && s.ws?.readyState === WebSocket.OPEN) {
@@ -256,6 +278,7 @@ export class CloudWorker extends EventEmitter {
   }
 
   private onStreamOpen(m: Json): void {
+    this.warm();
     const sid = Number(m.sid);
     const old = this.streams.get(sid);
     if (old) this.closeSession(old, false);
@@ -269,6 +292,8 @@ export class CloudWorker extends EventEmitter {
       wsOpen: false,
       sig: '',
       agc: new Agc(),
+      pitch: new PitchTracker(),
+      lastSaid: new Map(),
       pending: [],
       pendingBytes: 0,
       lastAudioAt: performance.now(),
@@ -536,28 +561,63 @@ export class CloudWorker extends EventEmitter {
     const dubId = dubSeq++;
     const ctrl = new AbortController();
     const startedAt = performance.now();
+    const voiceId = this.voiceFor(s);
+    const previous = s.lastSaid.get(lang) ?? '';
+    s.lastSaid.set(lang, text);
     this.dubs.set(dubId, { ctrl, sid: s.sid, startedAt });
     this.emit('event', {
       type: 'tts_start', dub_id: dubId, sid: s.sid, utt_id: s.utt.id, user_id: s.userId, lang, text,
       tier: 2, voice: 'house', provider: 'elevenlabs', incremental: true, sample_rate: 48000,
     });
-    void this.synthesize(dubId, elLang, text, ctrl.signal, startedAt);
+    void this.synthesize(dubId, { voiceId, elLang, text, previous }, ctrl.signal, startedAt);
   }
 
-  private async synthesize(dubId: number, elLang: string, text: string, signal: AbortSignal, startedAt: number): Promise<void> {
+  /**
+   * Each speaker keeps one voice for the whole call. Lower-pitched speakers get a lower voice,
+   * higher-pitched a higher one, and two people in the same call never share a voice while
+   * the pool has a free one.
+   */
+  voiceFor(s: Stream): string {
+    if (this.o.elevenVoiceId) return this.o.elevenVoiceId;
+    let g = this.voiceOf.get(s.guildId);
+    if (!g) this.voiceOf.set(s.guildId, (g = new Map()));
+    const have = g.get(s.userId);
+    if (have) return have;
+    const hz = s.pitch.hz;
+    const pool = hz !== null && hz < PITCH_SPLIT_HZ ? this.o.voices.low : this.o.voices.high;
+    const other = pool === this.o.voices.low ? this.o.voices.high : this.o.voices.low;
+    const used = new Set(g.values());
+    // stable per user (same person, same voice next time), but skip voices taken in this call
+    const start = hashStr(s.userId) % pool.length;
+    let pick: string | undefined;
+    for (let k = 0; k < pool.length && !pick; k++) if (!used.has(pool[(start + k) % pool.length]!)) pick = pool[(start + k) % pool.length];
+    if (!pick && hz === null) pick = other.find((v) => !used.has(v)); // pitch unknown: any free voice
+    pick ??= pool[start]!;
+    g.set(s.userId, pick);
+    return pick;
+  }
+
+  private async synthesize(
+    dubId: number,
+    req: { voiceId: string; elLang: string; text: string; previous: string },
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<void> {
     let frames = 0;
     let firstAudio: number | undefined;
     let reason = 'done';
     let carry: Buffer | null = null;
     try {
-      const url = `${this.o.elevenBaseUrl}/v1/text-to-speech/${encodeURIComponent(this.o.elevenVoiceId)}/stream?output_format=pcm_48000`;
-      const res = await fetch(url, {
-        method: 'POST',
-        signal,
-        headers: { 'xi-api-key': this.o.elevenKey, 'Content-Type': 'application/json', Accept: 'audio/pcm' },
-        body: JSON.stringify({ text, model_id: this.o.elevenModel, language_code: elLang }),
+      const url = `${this.o.elevenBaseUrl}/v1/text-to-speech/${encodeURIComponent(req.voiceId)}/stream?output_format=pcm_48000`;
+      const body = JSON.stringify({
+        text: req.text,
+        model_id: this.o.elevenModel,
+        language_code: req.elLang,
+        // the previous phrase lets the voice carry its intonation across phrase boundaries
+        ...(req.previous ? { previous_text: req.previous } : {}),
+        voice_settings: { stability: 0.45, similarity_boost: 0.8, use_speaker_boost: true, speed: 1.05 },
       });
-      if (!res.ok || !res.body) throw new Error(`ElevenLabs HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const res = await this.fetchWithFirstByteTimeout(url, body, signal);
       let seq = 0;
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
         let buf = Buffer.from(chunk);
@@ -591,6 +651,45 @@ export class CloudWorker extends EventEmitter {
         latency: firstAudio === undefined ? {} : { tts_first_audio: Math.round(firstAudio) },
       });
     }
+  }
+
+  /** POST to ElevenLabs; if no response headers arrive within TTS_FIRST_BYTE_MS, retry once. */
+  private async fetchWithFirstByteTimeout(url: string, body: string, signal: AbortSignal): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const ctrl = new AbortController();
+      const onAbort = () => ctrl.abort();
+      signal.addEventListener('abort', onAbort, { once: true });
+      const timer = setTimeout(() => ctrl.abort(), TTS_FIRST_BYTE_MS);
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { 'xi-api-key': this.o.elevenKey, 'Content-Type': 'application/json', Accept: 'audio/pcm' },
+          body,
+        });
+        clearTimeout(timer);
+        if (!res.ok || !res.body) {
+          const msg = `ElevenLabs HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`;
+          if (attempt === 0 && (res.status === 429 || res.status >= 500)) continue;
+          throw new Error(msg);
+        }
+        return res;
+      } catch (e) {
+        clearTimeout(timer);
+        if (signal.aborted || attempt >= 1) throw e;
+        this.log.info('tts slow to start, retrying');
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
+    }
+  }
+
+  /** Keep a TLS connection to ElevenLabs open so the first dub of a turn doesn't pay for the handshake. */
+  private warm(): void {
+    const now = Date.now();
+    if (now - this.lastWarm < WARM_EVERY_MS) return;
+    this.lastWarm = now;
+    fetch(`${this.o.elevenBaseUrl}/`, { method: 'HEAD', signal: AbortSignal.timeout(5_000) }).then((r) => r.body?.cancel(), () => {});
   }
 
   private cancelDub(dubId: number, _reason: string): void {
@@ -653,4 +752,10 @@ function topLang(u: Utt): string | null {
   let n = 0;
   for (const [l, c] of u.langCount) if (c > n) [best, n] = [l, c];
   return best;
+}
+
+function hashStr(x: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < x.length; i++) h = Math.imul(h ^ x.charCodeAt(i), 16777619);
+  return h >>> 0;
 }

@@ -69,6 +69,16 @@ export class WebHub {
     this.sendJson(l, { type: 'status', live: this.sessions.has(l.guildId), lang });
   }
 
+  /** The user picked a language in Discord: switch any player they have open. */
+  setUserLang(guildId: string, userId: string, lang: string): void {
+    for (const l of this.listeners.get(guildId) ?? []) if (l.userId === userId) this.setLang(l, lang);
+  }
+
+  /** Volume set from Discord (10-200 %): apply to any player the user has open. */
+  setUserVolume(guildId: string, userId: string, percent: number): void {
+    for (const l of this.listeners.get(guildId) ?? []) if (l.userId === userId) this.sendJson(l, { type: 'volume', value: percent });
+  }
+
   setHearSelf(l: Listener, on: boolean): void {
     l.hearSelf = on;
   }

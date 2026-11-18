@@ -34,23 +34,25 @@ function listJoin(xs: string[]): string {
   return `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
 }
 
-/** One plain sentence describing what will happen. */
+/** The language spoken into the voice channel, or null when the channel voice is off. */
+export function channelVoice(s: GuildSettings): string | null {
+  if (s.dubLang === null) return null;
+  if (s.dubLang === 'auto' || !s.textTargets.includes(s.dubLang)) return s.textTargets[0] ?? null;
+  return s.dubLang;
+}
+
+/** Plain sentences describing what will happen. */
 export function describe(s: GuildSettings): string {
   const langs = s.textTargets.slice(0, 3);
-  const names = langs.map(langLabel);
-  const voice = s.dubLang !== null;
-  const lines = [
-    `Anyone can speak **any language**. VocaLink translates it into ${listJoin(names.map((n) => `**${n}**`))}.`,
-  ];
-  if (voice && langs.length >= 2) {
-    lines.push(`🔊 In the voice channel, ${nice(langs[0]!)} speech is spoken in ${nice(langs[1]!)}, and everything else in ${nice(langs[0]!)}.`);
-  } else if (voice) {
-    lines.push(`🔊 In the voice channel, everything is spoken in ${nice(langs[0]!)}.`);
-  } else {
-    lines.push('🔇 Nothing is spoken in the voice channel.');
-  }
-  lines.push(s.captions ? '💬 Live captions appear in a thread.' : '💬 Captions are off.');
-  lines.push('🎧 Want your own language only? Use **/listen**.');
+  const main = channelVoice(s);
+  const lines = [`Anyone can speak **any language**. Captions in ${listJoin(langs.map((l) => `**${langLabel(l)}**`))}.`];
+  lines.push(
+    main
+      ? `🔊 **Channel voice: ${langLabel(main)}.** When someone speaks another language, everyone hears it in ${nice(main)}. ${nice(main)} speech stays as it is.`
+      : '🔇 **Channel voice is off.** Nothing is spoken in the voice channel.',
+  );
+  lines.push(`🎧 **Speak a different language?** Use **/listen** to hear everyone in your language, privately. Only you hear it.`);
+  if (!s.captions) lines[0] = 'Anyone can speak **any language**. Captions are off.';
   return lines.join('\n');
 }
 
@@ -58,19 +60,21 @@ export function renderPanel(s: GuildSettings): { embeds: APIEmbed[]; components:
   const langs = s.textTargets.slice(0, 3);
   const select = new StringSelectMenuBuilder()
     .setCustomId('setup:langs')
-    .setPlaceholder('🌐 Choose your server’s languages (up to 3)')
+    .setPlaceholder('🌐 Languages in this server (up to 3)')
     .setMinValues(1)
     .setMaxValues(3)
     .addOptions(
       PANEL_LANGS.map((l) => ({ label: nice(l), value: l, emoji: flag(l), default: langs.includes(l) })),
     );
-  const voiceOn = s.dubLang !== null;
+  const main = channelVoice(s);
+  const voice = new StringSelectMenuBuilder()
+    .setCustomId('setup:voice')
+    .setPlaceholder('🔊 Channel voice')
+    .addOptions(
+      ...langs.map((l) => ({ label: `Channel voice: ${nice(l)}`, description: `The group's main language is ${nice(l)}`, value: l, emoji: flag(l), default: main === l })),
+      { label: 'Channel voice: Off', description: 'Captions and personal listening only', value: 'off', emoji: '🔇', default: main === null },
+    );
   const buttons = [
-    new ButtonBuilder()
-      .setCustomId('setup:voice')
-      .setLabel(voiceOn ? 'Voice in channel: On' : 'Voice in channel: Off')
-      .setEmoji(voiceOn ? '🔊' : '🔇')
-      .setStyle(voiceOn ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('setup:captions')
       .setLabel(s.captions ? 'Captions: On' : 'Captions: Off')
@@ -88,6 +92,7 @@ export function renderPanel(s: GuildSettings): { embeds: APIEmbed[]; components:
     ],
     components: [
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(voice),
       new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons),
     ],
   };

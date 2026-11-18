@@ -39,6 +39,8 @@ export interface WebDeps {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
+/** identifies this deployment; pages embed it and reload when the live build changes */
+export const BUILD_ID = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_DEPLOYMENT_ID || String(Date.now())).slice(0, 12);
 
 function page(dir: string, name: string): string {
   return readFileSync(join(dir, name), 'utf8');
@@ -106,7 +108,7 @@ export class WebServer {
       this.pages.set(name, tpl);
     }
     const nonce = randomBytes(16).toString('base64');
-    const body = tpl.replace(/<script>/g, `<script nonce="${nonce}">`).replace(/<style>/g, `<style nonce="${nonce}">`);
+    const body = tpl.replaceAll('__BUILD_ID__', BUILD_ID).replace(/<script>/g, `<script nonce="${nonce}">`).replace(/<style>/g, `<style nonce="${nonce}">`);
     send(res, 200, body, 'text/html; charset=utf-8', {
       'Content-Security-Policy': `default-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'`,
     });
@@ -173,11 +175,13 @@ export class WebServer {
   private upgrade(req: IncomingMessage, sock: import('node:stream').Duplex, head: Buffer): void {
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname !== '/ws/listen') {
+      this.d.log.warn('websocket rejected: unknown path', { path: url.pathname });
       sock.destroy();
       return;
     }
     const p = this.d.signer.verify(url.searchParams.get('t'), 'listen');
     if (!p) {
+      this.d.log.warn('player rejected: link invalid or expired (e.g. signed before a restart without WEB_SECRET)');
       sock.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       sock.destroy();
       return;
@@ -188,14 +192,24 @@ export class WebServer {
       ws.on('pong', () => (w.alive = true));
       const lang = normalizeLang(url.searchParams.get('lang')) ?? p.l ?? 'en';
       const listener = this.d.hub.attach(p.g, p.u, lang === 'auto' ? 'en' : lang, ws);
+      const v = Number(url.searchParams.get('v') ?? 0);
+      listener.rate = v >= 3 ? 48000 : 24000;
+      // tell the player which build is live; a player from an older build reloads itself
+      ws.send(JSON.stringify({ type: 'build', id: BUILD_ID }));
+      if (url.searchParams.get('lang') && lang !== 'auto') this.d.store.updateUser(p.u, { hearLang: lang }); // remember the choice
       this.d.metrics.inc('web_listener_connects');
+      this.d.log.info('player connected', { guild: p.g, lang });
       ws.on('message', (data, isBinary) => {
         if (isBinary) return;
         try {
-          const m = JSON.parse(String(data)) as { type?: string; lang?: string };
+          const m = JSON.parse(String(data)) as { type?: string; lang?: string; on?: boolean };
+          if (m.type === 'hear_self') this.d.hub.setHearSelf(listener, Boolean(m.on));
           if (m.type === 'set_lang') {
             const l = normalizeLang(m.lang);
-            if (l && l !== 'auto') this.d.hub.setLang(listener, l);
+            if (l && l !== 'auto') {
+              this.d.hub.setLang(listener, l);
+              this.d.store.updateUser(p.u, { hearLang: l }); // remembered for next time
+            }
           }
         } catch {
           /* ignore malformed */

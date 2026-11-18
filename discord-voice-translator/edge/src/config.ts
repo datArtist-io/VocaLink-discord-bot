@@ -7,6 +7,18 @@ export interface EdgeConfig {
   clientId: string;
   devGuildId: string | null;
   registerCommandsOnStart: boolean;
+  /** 'cloud' = fast in-process pipeline (Soniox + ElevenLabs); 'worker' = self-hosted Python worker. */
+  pipeline: 'cloud' | 'worker';
+  cloud: {
+    sonioxApiKey: string;
+    sonioxUrl?: string;
+    sonioxModel?: string;
+    elevenApiKey: string;
+    elevenVoiceId?: string;
+    elevenModel?: string;
+    elevenConcurrency?: number;
+    defaultLangs: string[];
+  };
   workers: { host: string; port: number }[];
   workerToken: string;
   dbPath: string;
@@ -34,18 +46,35 @@ function req(env: NodeJS.ProcessEnv, k: string): string {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { requireDiscord?: boolean } = {}): EdgeConfig {
   const requireDiscord = opts.requireDiscord ?? true;
-  const port = Number(env.WEB_PORT ?? 8080);
+  const port = Number(env.WEB_PORT ?? env.PORT ?? 8080);
+  const pipeline = (env.PIPELINE ?? (env.SONIOX_API_KEY && !env.WORKER_URLS ? 'cloud' : 'worker')) === 'cloud' ? 'cloud' : 'worker';
+  if (pipeline === 'cloud') {
+    req(env, 'SONIOX_API_KEY');
+    req(env, 'ELEVENLABS_API_KEY');
+  }
   return {
     discordToken: requireDiscord ? req(env, 'DISCORD_TOKEN') : (env.DISCORD_TOKEN ?? ''),
     clientId: requireDiscord ? req(env, 'DISCORD_CLIENT_ID') : (env.DISCORD_CLIENT_ID ?? ''),
     devGuildId: env.DEV_GUILD_ID || null,
     registerCommandsOnStart: (env.REGISTER_COMMANDS ?? '1') === '1',
+    pipeline,
+    cloud: {
+      sonioxApiKey: env.SONIOX_API_KEY ?? '',
+      sonioxUrl: env.SONIOX_WS_URL || undefined,
+      sonioxModel: env.SONIOX_MODEL || undefined,
+      elevenApiKey: env.ELEVENLABS_API_KEY ?? '',
+      elevenVoiceId: env.ELEVENLABS_VOICE_ID || undefined,
+      elevenModel: env.ELEVENLABS_MODEL || undefined,
+      elevenConcurrency: env.ELEVENLABS_CONCURRENCY ? Number(env.ELEVENLABS_CONCURRENCY) : undefined,
+      defaultLangs: (env.DEFAULT_SPOKEN_LANGS ?? 'tl,en').split(',').map((x) => x.trim()).filter(Boolean),
+    },
     workers: parseWorkerUrls(env.WORKER_URLS ?? 'worker:7700'),
     workerToken: env.WORKER_TOKEN ?? '',
     dbPath: env.DB_PATH ?? '/data/edge.sqlite',
     webPort: port,
     webHost: env.WEB_HOST ?? '0.0.0.0',
-    publicUrl: (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, ''),
+    // accept "my-app.up.railway.app" as well as a full URL
+    publicUrl: ((u) => (/^https?:\/\//.test(u) ? u : `https://${u}`))(env.PUBLIC_URL || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${port}`)).replace(/\/$/, ''),
     webSecret: env.WEB_SECRET || null,
     mirrorTokens: (env.MIRROR_BOT_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     defaultTextTargets: (env.DEFAULT_TEXT_TARGETS ?? 'en').split(',').map((s) => s.trim()).filter(Boolean),

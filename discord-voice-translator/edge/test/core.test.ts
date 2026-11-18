@@ -130,10 +130,11 @@ test('pcm helpers', () => {
 test('captions: formatting escapes markdown and mentions', () => {
   assert.equal(escapeMd('*hi* @everyone'), '\\*hi\\* @​everyone');
   const s = formatCaption({ name: 'Ada', srcLang: 'yo', prob: 0.9, original: 'Ẹ kú àárọ̀', translations: { en: 'Good morning', fr: null }, flags: ['low_confidence'], voiceTier: { en: 2 } });
-  assert.match(s, /\*\*Ada\*\* · YO 90%/);
-  assert.match(s, /→ \*\*EN\*\* 🔊 Good morning/);
-  assert.doesNotMatch(s, /FR/);
-  assert.match(s, /say that again/);
+  assert.match(s, /\*\*Ada\*\*/);
+  assert.match(s, /🇺🇸 Good morning/);
+  assert.doesNotMatch(s, /🇫🇷/);
+  assert.match(s, /say it again/);
+  assert.doesNotMatch(s, /90%/); // no technical numbers in captions
 });
 
 class FakeTarget {
@@ -171,7 +172,7 @@ test('captions: debounced edits, finals win, rate-limited digest', async () => {
 
 test('store: settings, prefs, glossary, captions index, analytics, consent', () => {
   const st = new Store(':memory:');
-  assert.deepEqual(st.getSettings('g').textTargets, ['en']);
+  assert.deepEqual(st.getSettings('g').textTargets, ['en', 'tl']); // new default: English + Tagalog captions
   st.updateSettings('g', { textTargets: ['en', 'yo'], dubLang: 'en' });
   assert.equal(st.getSettings('g').dubLang, 'en');
   st.updateUser('u', { speakLang: 'yo', optout: true });

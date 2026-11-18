@@ -1,10 +1,11 @@
+import { decimate2 } from '../audio/pcm.js';
+
 /**
  * Fan-out of captions and translated audio to companion web listeners.
  * Each listener picks a language; the guild session adds that language to the
  * worker's audio targets while at least one listener wants it.
  */
 
-import { decimate2 } from '../audio/pcm.js';
 
 export interface SocketLike {
   send(data: string | Buffer): void;
@@ -18,6 +19,10 @@ export interface Listener {
   userId: string;
   lang: string;
   sock: SocketLike;
+  /** test mode: also hear your own speech translated */
+  hearSelf?: boolean;
+  /** audio rate this player understands (players from before v3 only know 24 kHz) */
+  rate?: 24000 | 48000;
 }
 
 export interface HubSession {
@@ -30,6 +35,8 @@ let nextId = 1;
 export class WebHub {
   private listeners = new Map<string, Set<Listener>>(); // guildId -> listeners
   private sessions = new Map<string, HubSession>();
+  /** dub id -> the user whose speech it translates (a listener never gets their own) */
+  private dubOwner = new Map<number, string>();
   stats = { audioFramesSent: 0, dropped: 0 };
 
   registerSession(guildId: string, s: HubSession): void {
@@ -65,6 +72,25 @@ export class WebHub {
     this.sendJson(l, { type: 'status', live: this.sessions.has(l.guildId), lang });
   }
 
+  /** The user picked a language in Discord: switch any player they have open. */
+  setUserLang(guildId: string, userId: string, lang: string): void {
+    for (const l of this.listeners.get(guildId) ?? []) if (l.userId === userId) this.setLang(l, lang);
+  }
+
+  /** Volume set from Discord (10-200 %): apply to any player the user has open. */
+  setUserVolume(guildId: string, userId: string, percent: number): void {
+    for (const l of this.listeners.get(guildId) ?? []) if (l.userId === userId) this.sendJson(l, { type: 'volume', value: percent });
+  }
+
+  setHearSelf(l: Listener, on: boolean): void {
+    l.hearSelf = on;
+  }
+
+  /** a listener gets this person's translations unless it is themselves (and not in test mode) */
+  private wants(l: Listener, speaker: string | undefined): boolean {
+    return l.userId !== speaker || Boolean(l.hearSelf);
+  }
+
   detach(l: Listener): void {
     this.listeners.get(l.guildId)?.delete(l);
     this.sync(l.guildId);
@@ -89,27 +115,39 @@ export class WebHub {
   caption(guildId: string, ev: { name: string; userId: string; srcLang: string; original: string; translations: Record<string, string | null>; final: boolean; uttKey: string }): void {
     for (const l of this.listeners.get(guildId) ?? []) {
       const text = l.lang === ev.srcLang ? ev.original : (ev.translations[l.lang] ?? null);
-      this.sendJson(l, { type: 'caption', key: ev.uttKey, name: ev.name, user_id: ev.userId, src: ev.srcLang, original: ev.original, text, final: ev.final });
+      this.sendJson(l, { type: 'caption', key: ev.uttKey, name: ev.name, user_id: ev.userId, you: l.userId === ev.userId && !l.hearSelf, src: ev.srcLang, original: ev.original, text, final: ev.final });
     }
   }
 
   dubStart(guildId: string, lang: string, meta: Record<string, unknown>): void {
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 24000 });
+    const owner = String(meta.user_id ?? '');
+    this.dubOwner.set(Number(meta.dub_id), owner);
+    if (this.dubOwner.size > 500) this.dubOwner.delete(this.dubOwner.keys().next().value!);
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: l.rate ?? 24000 });
+  }
+
+  /** Someone started/stopped talking: drives "speaking" rings, and lowers your translations while YOU talk. */
+  speaking(guildId: string, userId: string, on: boolean): void {
+    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'speaking', user_id: userId, you: l.userId === userId && !l.hearSelf, on });
   }
 
   dubAudio(guildId: string, lang: string, dubId: number, seq: number, pcm48: Buffer): void {
-    let pkt: Buffer | null = null;
+    const pkts: Partial<Record<24000 | 48000, Buffer>> = {};
+    const owner = this.dubOwner.get(dubId);
     for (const l of this.listeners.get(guildId) ?? []) {
-      if (l.lang !== lang) continue;
+      if (l.lang !== lang || !this.wants(l, owner)) continue;
       if ((l.sock.bufferedAmount ?? 0) > 512 * 1024) {
         this.stats.dropped++;
         continue;
       }
+      const rate = l.rate ?? 24000;
+      let pkt = pkts[rate];
       if (!pkt) {
         const h = Buffer.allocUnsafe(8);
         h.writeUInt32BE(dubId >>> 0, 0);
         h.writeUInt32BE(seq >>> 0, 4);
-        pkt = Buffer.concat([h, decimate2(pcm48)]);
+        // full 48 kHz for current players; 24 kHz for players opened before the update
+        pkt = pkts[rate] = Buffer.concat([h, rate === 48000 ? pcm48 : decimate2(pcm48)]);
       }
       l.sock.send(pkt);
       this.stats.audioFramesSent++;
@@ -117,7 +155,9 @@ export class WebHub {
   }
 
   dubEnd(guildId: string, lang: string, dubId: number): void {
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang) this.sendJson(l, { type: 'dub_end', dub_id: dubId });
+    const owner = this.dubOwner.get(dubId);
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_end', dub_id: dubId });
+    this.dubOwner.delete(dubId);
   }
 
   notice(guildId: string, message: string): void {

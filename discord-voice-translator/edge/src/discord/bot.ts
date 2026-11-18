@@ -7,6 +7,7 @@ import { randomInt } from 'node:crypto';
 import {
   ActionRowBuilder,
   ButtonBuilder,
+  StringSelectMenuBuilder,
   ButtonStyle,
   ChannelType,
   ComponentType,
@@ -28,10 +29,14 @@ import {
   type MessageContextMenuCommandInteraction,
   type ModalSubmitInteraction,
   type VoiceState,
+  type ButtonInteraction,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 
 import { createDecoder } from '../audio/opus.js';
 import type { EdgeConfig } from '../config.js';
+import { describe, flag, langLabel, PANEL_LANGS, renderPanel } from './setupPanel.js';
+import { HOUSE_VOICES, type VoiceBank } from '../worker/VoiceBank.js';
 import { autocompleteLanguages, languageName, normalizeLang, parseLangList } from '../languages.js';
 import type { Metrics } from '../metrics/Metrics.js';
 import type { GuildSettings, Store } from '../store/Store.js';
@@ -63,6 +68,7 @@ export interface BotDeps {
   hub: WebHub;
   signer: TokenSigner;
   mirrors: MirrorManager | null;
+  voiceBank?: VoiceBank | null;
   log: Logger;
 }
 
@@ -87,6 +93,11 @@ export class TranslatorBot {
       if (i.isAutocomplete()) return await this.autocomplete(i);
       if (i.isMessageContextMenuCommand()) return await this.correctMenu(i);
       if (i.isModalSubmit() && i.customId.startsWith('correct:')) return await this.correctSubmit(i);
+      if ((i.isStringSelectMenu() || i.isButton()) && i.customId.startsWith('setup:') && i.inGuild()) return await this.onSetupPanel(i);
+      if (i.isButton() && i.customId === 'listen:open' && i.inGuild()) return await this.replyTranslator(i, null);
+      if (i.isStringSelectMenu() && i.customId === 'listen:lang' && i.inGuild()) return await this.onTranslatorLang(i);
+      if (i.isButton() && (i.customId === 'listen:vol:+' || i.customId === 'listen:vol:-') && i.inGuild()) return await this.onTranslatorVolume(i);
+      if (((i.isStringSelectMenu() && i.customId === 'listen:voice') || (i.isButton() && i.customId === 'listen:voice:delete')) && i.inGuild()) return await this.onTranslatorVoice(i);
       if (!i.isChatInputCommand() || !i.inGuild()) return;
       this.d.metrics.inc(`cmd_${i.commandName}`);
       switch (i.commandName) {
@@ -98,6 +109,8 @@ export class TranslatorBot {
         }
         case 'mylang':
           return await this.cmdMyLang(i);
+        case 'setup':
+          return await this.cmdSetup(i);
         case 'settings':
           return await this.cmdSettings(i);
         case 'optout':
@@ -133,7 +146,7 @@ export class TranslatorBot {
 
   private async autocomplete(i: AutocompleteInteraction): Promise<void> {
     const f = i.options.getFocused(true);
-    const extra = f.name === 'speak' ? [{ name: 'Auto-detect (recommended)', value: 'auto' }] : f.name === 'dub' ? [{ name: 'Off (captions only)', value: 'off' }] : [];
+    const extra = f.name === 'speak' ? [{ name: 'Auto-detect (recommended)', value: 'auto' }] : f.name === 'dub' ? [{ name: 'Auto: everyone hears the other language (recommended)', value: 'auto' }, { name: 'Off (captions only)', value: 'off' }] : [];
     await i.respond(autocompleteLanguages(String(f.value), extra));
   }
 
@@ -176,7 +189,7 @@ export class TranslatorBot {
     const settings = this.d.store.getSettings(guild.id);
     const textChannel = ((i.options.getChannel('captions') as GuildTextBasedChannel | null) ?? (i.channel as GuildTextBasedChannel));
     let captionsChannel: GuildTextBasedChannel = textChannel;
-    if (settings.captionsInThread && 'threads' in textChannel && textChannel.type === ChannelType.GuildText) {
+    if (settings.captions && settings.captionsInThread && 'threads' in textChannel && textChannel.type === ChannelType.GuildText) {
       try {
         captionsChannel = await textChannel.threads.create({
           name: `🌐 Live translation · ${vc.name}`.slice(0, 100),
@@ -232,6 +245,7 @@ export class TranslatorBot {
         }
         return null;
       },
+      fetchMember: (uid) => guild.members.fetch(uid).then((mm) => ({ name: mm.displayName, bot: mm.user.bot }), () => null),
       decoderFactory: createDecoder,
       log: this.d.log.child(`session-${guild.id}`),
       botUserId: this.d.client.user!.id,
@@ -255,11 +269,26 @@ export class TranslatorBot {
       }
     }
 
-    const privacy = this.d.cfg.privacyUrl ? ` Privacy: <${this.d.cfg.privacyUrl}>` : '';
+    const privacy = this.d.cfg.privacyUrl ? ` · [Privacy](<${this.d.cfg.privacyUrl}>)` : '';
+    if (this.d.cfg.pipeline === 'cloud') {
+      await i.editReply({
+        embeds: [{
+          title: `🔴 Live translation is on in ${vc.name}`,
+          description: describe(settings) + `\n\n-# Voices are processed live and never recorded. \`/optout\` anytime${privacy}`,
+          color: 0xed4245,
+        }],
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId('listen:open').setLabel('Open my translator').setEmoji('🎧').setStyle(ButtonStyle.Primary),
+        )],
+        allowedMentions: { parse: [] },
+      });
+      this.d.log.info('session started', { guild: guild.id, channel: vc.id });
+      return;
+    }
     const notice =
       `🔴 **Live translation is ON in ${vc}.**\n` +
       `I process what people say in this channel to show live captions and translations` +
-      `${settings.dubLang ? ` and speak them in ${languageName(settings.dubLang)}` : ''}. ` +
+      `${settings.dubLang === 'auto' ? ' and speak each one in the other language' : settings.dubLang ? ` and speak them in ${languageName(settings.dubLang)}` : ''}. ` +
       `Audio is **not recorded or stored**.${settings.summaries ? ' A text transcript is kept in memory only until the call summary is posted.' : ''} ` +
       `Don't want your voice processed? Use \`/optout\` (instant).${privacy}\n` +
       `Captions: ${captionsChannel}. Personal translated audio: \`/listen\`.` + mirrorNote;
@@ -270,6 +299,30 @@ export class TranslatorBot {
     this.d.log.info('session started', { guild: guild.id, channel: vc.id });
   }
 
+  // ------------------------------------------------------------------ /setup panel
+  private async cmdSetup(i: ChatInputCommandInteraction): Promise<void> {
+    const s = this.d.store.getSettings(i.guildId!);
+    await i.reply({ ...renderPanel(s), flags: EPH });
+  }
+
+  private async onSetupPanel(i: StringSelectMenuInteraction | ButtonInteraction): Promise<void> {
+    const gid = i.guildId!;
+    const cur = this.d.store.getSettings(gid);
+    let patch: Partial<GuildSettings> = {};
+    if (i.isStringSelectMenu() && i.customId === 'setup:langs') {
+      const picked = i.values.filter((v) => (PANEL_LANGS as readonly string[]).includes(v));
+      if (picked.length) patch = { textTargets: picked };
+    } else if (i.isStringSelectMenu() && i.customId === 'setup:voice') {
+      const v = i.values[0];
+      patch = { dubLang: v === 'off' ? null : v && cur.textTargets.includes(v) ? v : 'auto' };
+    } else if (i.customId === 'setup:captions') {
+      patch = { captions: !cur.captions };
+    }
+    const s = this.d.store.updateSettings(gid, patch);
+    this.sessions.get(gid)?.session.reloadSettings();
+    await i.update(renderPanel(s));
+  }
+
   private async cmdStop(i: ChatInputCommandInteraction): Promise<void> {
     if (!this.sessions.has(i.guildId!)) {
       await i.reply({ content: 'Not translating in this server.', flags: EPH });
@@ -277,7 +330,7 @@ export class TranslatorBot {
     }
     await i.deferReply();
     await this.stop(i.guildId!, `stopped by ${i.user.username}`);
-    await i.editReply('⏹️ Live translation stopped. Captions and summary are in the caption thread.');
+    await i.editReply(this.d.cfg.pipeline === 'cloud' ? '⏹️ Live translation stopped. See you next call!' : '⏹️ Live translation stopped. Captions and summary are in the caption thread.');
   }
 
   async stop(guildId: string, reason: string): Promise<void> {
@@ -332,7 +385,7 @@ export class TranslatorBot {
     if (a) {
       const d = a.session.describe() as { speakers: { name: string }[]; dub_queue: number; web_langs: string[]; mirrors: string[] };
       const s = a.session.settings;
-      lines.push(`Captions: ${s.textTargets.map((x) => x.toUpperCase()).join(', ')} · Dub: ${s.dubLang ? s.dubLang.toUpperCase() : 'off'} (${s.voiceMode}) · Mode: ${s.mode}`);
+      lines.push(`Captions: ${s.textTargets.map((x) => x.toUpperCase()).join(', ')} · Dub: ${s.dubLang === 'auto' ? 'auto' : s.dubLang ? s.dubLang.toUpperCase() : 'off'} (${s.voiceMode}) · Mode: ${s.mode}`);
       lines.push(`Speakers: ${d.speakers.map((x) => x.name).join(', ') || '—'} · Web listeners: ${this.d.hub.count(i.guildId!)} ${d.web_langs.length ? `(${d.web_langs.join(', ')})` : ''} · Mirrors: ${d.mirrors.join(', ') || '—'} · Dub queue: ${d.dub_queue}`);
     }
     if (info) {
@@ -373,6 +426,7 @@ export class TranslatorBot {
 
   private async cmdOpt(i: ChatInputCommandInteraction, out: boolean): Promise<void> {
     this.d.store.updateUser(i.user.id, { optout: out });
+    if (out) await this.d.voiceBank?.remove(i.user.id); // their cloned voice is deleted too
     if (out) for (const a of this.sessions.values()) a.session.dropUser(i.user.id); // every server, immediately
     await i.reply({
       content: out
@@ -399,7 +453,7 @@ export class TranslatorBot {
     const dub = i.options.getString('dub');
     if (dub !== null) {
       const d = dub === 'off' ? null : normalizeLang(dub);
-      if (dub !== 'off' && (!d || d === 'auto')) throw new Error(`Unknown language "${dub}"`);
+      if (dub !== 'off' && !d) throw new Error(`Unknown language "${dub}"`);
       patch.dubLang = d;
     }
     const mode = i.options.getString('mode');
@@ -433,7 +487,7 @@ export class TranslatorBot {
     return [
       '**Translation settings**',
       `Captions: ${s.textTargets.map((l) => `${languageName(l)} (${l})`).join(', ')}`,
-      `Voice dubbing: ${s.dubLang ? `${languageName(s.dubLang)} · ${s.voiceMode === 'clone' ? 'cloned voices of consenting speakers' : 'house voice'}` : 'off'}`,
+      `Voice dubbing: ${s.dubLang ? `${s.dubLang === 'auto' ? `auto (${s.textTargets.slice(0, 2).map(languageName).join(' ⇄ ')})` : languageName(s.dubLang)} · ${s.voiceMode === 'clone' ? 'cloned voices of consenting speakers' : 'house voice'}` : 'off'}`,
       `Mode: ${s.mode} · Summaries: ${s.summaries ? 'on' : 'off'} · Caption thread: ${s.captionsInThread ? 'on' : 'off'}`,
       `Mirror channels: ${s.mirrors ? s.mirrorLangs.join(', ') || '(no languages set)' : 'off'}`,
       `Expected languages: ${s.expectedLangs ? s.expectedLangs.join(', ') : 'auto (any of ~100)'}`,
@@ -670,16 +724,105 @@ export class TranslatorBot {
   }
 
   private async cmdListen(i: ChatInputCommandInteraction): Promise<void> {
-    const pref = this.d.store.getUser(i.user.id);
     const langOpt = i.options.getString('lang');
-    const lang = (langOpt ? normalizeLang(langOpt) : null) ?? pref.hearLang ?? 'en';
-    const t = this.d.signer.sign({ g: i.guildId!, u: i.user.id, s: 'listen', l: lang }, this.d.cfg.listenTtlMs);
-    const live = this.sessions.has(i.guildId!) ? '' : '\n-# No session is running yet; the page will connect when one starts.';
-    await i.reply({
-      content: `🎧 Your personal translated stream (${languageName(lang)}): ${this.d.cfg.publicUrl}/listen?t=${t}\nTip: in Discord, right-click foreign speakers → lower **User Volume**, then use the page's mixer.${live}`,
-      flags: EPH,
-    });
+    const lang = langOpt ? normalizeLang(langOpt) : null;
+    if (lang && lang !== 'auto') this.d.store.updateUser(i.user.id, { hearLang: lang });
+    await this.replyTranslator(i, lang && lang !== 'auto' ? lang : null);
   }
+
+  /** The personal translator, in Discord: a language dropdown (with flags) + an Open button. Only you see it. */
+  private translatorPanel(guildId: string, userId: string) {
+    const hear = this.d.store.getUser(userId).hearLang;
+    const lang = hear && (PANEL_LANGS as readonly string[]).includes(hear) ? hear : null;
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('listen:lang')
+      .setPlaceholder('🌐 Choose the language you want to hear')
+      .addOptions(PANEL_LANGS.map((l) => ({ label: langLabel(l).replace(/^\S+\s/, ''), value: l, emoji: flag(l), default: l === lang })));
+    const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)];
+    const vol = this.volumeOf(userId);
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('listen:vol:-').setEmoji('🔉').setLabel('Quieter').setStyle(ButtonStyle.Secondary).setDisabled(vol <= 10),
+      new ButtonBuilder().setCustomId('listen:vol:show').setLabel(`Volume ${vol}%`).setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId('listen:vol:+').setEmoji('🔊').setLabel('Louder').setStyle(ButtonStyle.Secondary).setDisabled(vol >= 200),
+    ));
+    const vb = this.d.voiceBank;
+    let voiceLine = '';
+    if (vb) {
+      const pref = vb.pref(userId);
+      const st = vb.status(userId);
+      rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('listen:voice')
+          .setPlaceholder('🗣️ How others hear you')
+          .addOptions(
+            { label: 'My own voice', description: 'Others hear YOU speaking their language (recommended)', value: 'clone', emoji: '🗣️', default: pref === 'clone' },
+            { label: 'Automatic', description: 'A natural voice matched to yours', value: 'auto', emoji: '✨', default: !pref },
+            ...HOUSE_VOICES.map((h) => ({ label: h.name, description: `${h.desc} · ${h.low ? 'lower' : 'higher'} voice`, value: h.id, emoji: h.low ? '🎙️' : '🎤', default: pref === h.id })),
+          ),
+      ));
+      voiceLine =
+        st.status === 'ready' ? '\n🗣️ Others hear you **in your own voice**.'
+        : st.status === 'learning' ? `\n🗣️ Learning your voice: **${st.learnedPct ?? 0}%**. Just keep talking; it switches automatically.`
+        : st.status === 'creating' ? '\n🗣️ Creating your voice… a few seconds.'
+        : st.status === 'unavailable' ? `\n🗣️ Your own voice isn't available yet: ${st.detail}. Using a matched voice meanwhile.`
+        : pref ? `\n🗣️ Others hear you as **${HOUSE_VOICES.find((h) => h.id === pref)?.name ?? 'your chosen voice'}**.` : '';
+      if (pref === 'clone' || vb.cloneId(userId)) {
+        rows[1]!.addComponents(new ButtonBuilder().setCustomId('listen:voice:delete').setEmoji('🗑️').setLabel('Delete my voice').setStyle(ButtonStyle.Danger));
+      }
+    }
+    if (lang) {
+      const t = this.d.signer.sign({ g: guildId, u: userId, s: 'listen', l: lang }, this.d.cfg.listenTtlMs);
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(`${this.d.cfg.publicUrl}/listen?t=${t}&lang=${lang}&vol=${vol}`).setLabel(`Open my translator · ${langLabel(lang)}`),
+      ));
+    }
+    const content = (lang
+      ? `🎧 **Your personal translator.** You'll hear everyone in ${langLabel(lang)}, privately.\n-# Only you hear it. You never hear yourself. Use headphones.`
+      : '🎧 **Your personal translator.** Which language do you want to hear?') + voiceLine;
+    return { content, components: rows };
+  }
+
+  private async replyTranslator(i: ChatInputCommandInteraction | ButtonInteraction, _lang: string | null): Promise<void> {
+    await i.reply({ ...this.translatorPanel(i.guildId!, i.user.id), flags: EPH });
+  }
+
+  private volumeOf(userId: string): number {
+    const v = Number(this.d.store.getKv(`vol:${userId}`) ?? 100);
+    return Number.isFinite(v) ? Math.min(200, Math.max(10, v)) : 100;
+  }
+
+  private async onTranslatorVolume(i: ButtonInteraction): Promise<void> {
+    const step = i.customId.endsWith('+') ? 20 : -20;
+    const v = Math.min(200, Math.max(10, this.volumeOf(i.user.id) + step));
+    this.d.store.setKv(`vol:${i.user.id}`, String(v));
+    this.d.hub.setUserVolume(i.guildId!, i.user.id, v); // an open player follows instantly
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
+  private async onTranslatorVoice(i: StringSelectMenuInteraction | ButtonInteraction): Promise<void> {
+    const vb = this.d.voiceBank;
+    if (!vb) return;
+    if (i.isButton()) {
+      await vb.remove(i.user.id); // deletes the clone at ElevenLabs right away
+    } else {
+      const v = i.values[0] ?? 'auto';
+      // choosing "My own voice" is the person's own explicit consent to a voice clone
+      if (v === 'clone') { vb.retry(i.user.id); vb.setPref(i.user.id, 'clone'); }
+      else vb.setPref(i.user.id, v === 'auto' ? null : v);
+    }
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
+  private async onTranslatorLang(i: StringSelectMenuInteraction): Promise<void> {
+    const l = i.values[0];
+    if (l && (PANEL_LANGS as readonly string[]).includes(l)) {
+      this.d.store.updateUser(i.user.id, { hearLang: l });
+      this.d.hub.setUserLang(i.guildId!, i.user.id, l); // an open player switches instantly
+    }
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
+
 
   private async cmdLanguages(i: ChatInputCommandInteraction): Promise<void> {
     const info = this.d.pool.info();

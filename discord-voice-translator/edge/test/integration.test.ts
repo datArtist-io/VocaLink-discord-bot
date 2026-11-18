@@ -50,7 +50,7 @@ class Sock implements SocketLike {
 
 function makeSession(client: WorkerClient, opts: { dubLang?: string | null; textTargets?: string[] } = {}) {
   const store = new Store(':memory:');
-  store.updateSettings('g1', { textTargets: opts.textTargets ?? ['en', 'fr'], dubLang: opts.dubLang === undefined ? 'fr' : opts.dubLang });
+  store.updateSettings('g1', { summaries: true, textTargets: opts.textTargets ?? ['en', 'fr'], dubLang: opts.dubLang === undefined ? 'fr' : opts.dubLang });
   const voice = new FakeVoiceLink();
   const target = new Target();
   const hub = new WebHub();
@@ -96,9 +96,9 @@ test('speech -> captions + French dub audio in the voice channel + web listener'
 
   // captions: final caption with original + French translation
   const caps = target.all();
-  assert.match(caps, /\*\*Ada\*\* · EN/);
+  assert.match(caps, /🇺🇸 \*\*Ada\*\*/);
   assert.match(caps, /> good morning everyone, the meeting starts now/);
-  assert.match(caps, /→ \*\*FR\*\* 🔊 \[fr\] good morning everyone, the meeting starts now/);
+  assert.match(caps, /🇫🇷 \[fr\] good morning everyone, the meeting starts now/);
 
   // the dub actually played in the channel decodes to the French translation
   const mono = stereoToMono(Buffer.concat(voice.played));

@@ -53,7 +53,7 @@ test('web server: health, pages, dashboard auth, listener websocket', async () =
     }));
 
     // good token: status, caption in listener language, binary audio, language switch
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/listen?t=${listen}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/listen?t=${listen}&v=3`); // current player (48 kHz)
     const msgs: Record<string, unknown>[] = [];
     const bins: Buffer[] = [];
     ws.on('message', (d, isBin) => (isBin ? bins.push(d as Buffer) : msgs.push(JSON.parse(String(d)))));
@@ -72,7 +72,7 @@ test('web server: health, pages, dashboard auth, listener websocket', async () =
     assert.equal(cap.text, 'ẹ n lẹ');
     assert.equal(bins.length, 1);
     assert.equal(bins[0]!.readUInt32BE(0), 7);
-    assert.equal(bins[0]!.length, 8 + 960); // 48k -> 24k
+    assert.equal(bins[0]!.length, 8 + 1920); // full 48 kHz quality to the player
     ws.send(JSON.stringify({ type: 'set_lang', lang: 'French' }));
     await new Promise((r) => setTimeout(r, 100));
     assert.deepEqual(langsSet.at(-1), ['fr']);

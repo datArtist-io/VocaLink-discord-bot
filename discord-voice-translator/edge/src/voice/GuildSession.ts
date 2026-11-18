@@ -80,6 +80,8 @@ export interface GuildSessionDeps {
   metrics: Metrics;
   captions: CaptionSink | null;
   resolveMember: (userId: string) => MemberInfo | null;
+  /** Look a member up from Discord (for people the cache doesn't know yet). */
+  fetchMember?: (userId: string) => Promise<MemberInfo | null>;
   decoderFactory: () => PcmDecoder;
   log: Logger;
   botUserId: string;
@@ -240,9 +242,18 @@ export class GuildSession extends EventEmitter {
     return s;
   }
 
+  /** Languages dubbed into the voice channel itself. */
+  private mainDubLangs(): string[] {
+    const d = this.settings.dubLang;
+    if (!d) return [];
+    // 'auto' = the group's main language (first server language). Speakers of other languages
+    // are spoken in it; speech already in it stays silent. Everyone else uses /listen.
+    if (d === 'auto') return this.settings.textTargets.slice(0, 1);
+    return [d];
+  }
+
   private audioTargets(): string[] {
-    const set = new Set<string>();
-    if (this.settings.dubLang) set.add(this.settings.dubLang);
+    const set = new Set<string>(this.mainDubLangs());
     for (const l of this.mirrors.keys()) set.add(l);
     for (const l of this.webLangs) set.add(l);
     return [...set];
@@ -266,6 +277,7 @@ export class GuildSession extends EventEmitter {
       guild_id: this.guildId,
       text_targets: this.textTargets(),
       audio_targets: this.audioTargets(),
+      channel_dub_langs: this.mainDubLangs(),
       mode: s.mode,
       voice_mode: s.voiceMode,
       expected_langs: s.expectedLangs,
@@ -328,9 +340,19 @@ export class GuildSession extends EventEmitter {
   // ------------------------------------------------------------------ uplink
   private onSpeaking = (userId: string, speaking: boolean): void => {
     if (userId === this.d.botUserId) return;
-    const m = this.d.resolveMember(userId);
+    let m = this.d.resolveMember(userId);
+    if (!m && speaking && this.d.fetchMember && !this.speakers.has(userId)) {
+      // Unknown to the cache: start listening NOW so their first sentence isn't lost, then confirm.
+      m = { name: '…', bot: false };
+      void this.d.fetchMember(userId).then((info) => {
+        const sp = this.speakers.get(userId);
+        if (!info || info.bot) this.dropUser(userId);
+        else if (sp) sp.name = info.name;
+      });
+    }
     if (!m || m.bot) return;
     this.main.humanSpeaking(userId, speaking);
+    this.d.hub?.speaking(this.guildId, userId, speaking);
     if (speaking) {
       if (this.d.store.optedOut(userId) && !this.enrollTaps.has(userId)) return;
       this.ensureSpeaker(userId, m);
@@ -444,6 +466,15 @@ export class GuildSession extends EventEmitter {
           return this.onPartial(e as unknown as PartialEvent);
         case 'partial_translation':
           return this.onPartialTranslation(e as unknown as PartialTranslationEvent);
+        case 'final_translation': {
+          // a server language finished a little after the caption was finalised: fill it in
+          const u = this.utts.get(this.uttKey(Number(e.sid), Number(e.utt_id)));
+          if (u && typeof e.lang === 'string' && typeof e.text === 'string' && !u.translations[e.lang]) {
+            u.translations = { ...u.translations, [e.lang]: e.text };
+            this.render(u);
+          }
+          return;
+        }
         case 'final':
           return this.onFinal(e as unknown as FinalEvent);
         case 'tts_start':
@@ -555,7 +586,7 @@ export class GuildSession extends EventEmitter {
       name: u.name, srcLang: u.srcLang, prob: u.final ? u.prob : undefined, original: u.original, translations: shown,
       partial: !u.final, flags: u.flags, notes: u.final ? u.notes : [], voiceTier: u.tiers,
     };
-    this.d.captions?.upsert(u.key, formatCaption(data), u.final);
+    if (this.settings.captions !== false) this.d.captions?.upsert(u.key, formatCaption(data), u.final);
     this.d.hub?.caption(this.guildId, { name: u.name, userId: u.userId, srcLang: u.srcLang, original: u.original, translations: u.translations, final: u.final, uttKey: u.key });
   }
 
@@ -580,7 +611,7 @@ export class GuildSession extends EventEmitter {
     const meta: DubMeta = { dubId: e.dub_id, userId: e.user_id, lang: e.lang, text: e.text, incremental: e.incremental };
     const route: DubRoute = { lang: e.lang, userId: e.user_id, consumers: 0, ended: false, startAt: performance.now(), uttKey: this.uttKey(e.sid, e.utt_id) };
     this.dubs.set(e.dub_id, route);
-    if (this.settings.dubLang === e.lang) {
+    if (this.mainDubLangs().includes(e.lang)) {
       route.consumers++;
       this.main.enqueue(meta);
     }
@@ -603,7 +634,7 @@ export class GuildSession extends EventEmitter {
   private onDubAudio(dubId: number, seq: number, pcm: Buffer): void {
     const r = this.dubs.get(dubId);
     if (!r) return;
-    if (this.settings.dubLang === r.lang) this.main.push(dubId, pcm);
+    if (this.mainDubLangs().includes(r.lang)) this.main.push(dubId, pcm);
     this.mirrors.get(r.lang)?.sched.push(dubId, pcm);
     if (this.webLangs.includes(r.lang)) this.d.hub?.dubAudio(this.guildId, r.lang, dubId, seq, pcm);
   }
@@ -634,7 +665,7 @@ export class GuildSession extends EventEmitter {
     const r = this.dubs.get(it.dubId);
     if (!r) return;
     const u = this.utts.get(r.uttKey);
-    if (u && !u.firstAudioLogged && lang === this.settings.dubLang) {
+    if (u && !u.firstAudioLogged && this.mainDubLangs().includes(lang)) {
       u.firstAudioLogged = true;
       const ms = performance.now() - u.endedAt;
       if (ms > 0 && ms < 30_000) {

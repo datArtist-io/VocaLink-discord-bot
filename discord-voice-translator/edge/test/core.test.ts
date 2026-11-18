@@ -130,10 +130,11 @@ test('pcm helpers', () => {
 test('captions: formatting escapes markdown and mentions', () => {
   assert.equal(escapeMd('*hi* @everyone'), '\\*hi\\* @​everyone');
   const s = formatCaption({ name: 'Ada', srcLang: 'yo', prob: 0.9, original: 'Ẹ kú àárọ̀', translations: { en: 'Good morning', fr: null }, flags: ['low_confidence'], voiceTier: { en: 2 } });
-  assert.match(s, /\*\*Ada\*\* · YO 90%/);
-  assert.match(s, /→ \*\*EN\*\* 🔊 Good morning/);
-  assert.doesNotMatch(s, /FR/);
-  assert.match(s, /say that again/);
+  assert.match(s, /\*\*Ada\*\*/);
+  assert.match(s, /🇺🇸 Good morning/);
+  assert.doesNotMatch(s, /🇫🇷/);
+  assert.match(s, /say it again/);
+  assert.doesNotMatch(s, /90%/); // no technical numbers in captions
 });
 
 class FakeTarget {

@@ -13,7 +13,8 @@ test('new servers get auto dubbing, EN+TL captions and Tagalog/English hints by 
   const s = new Store(db()).getSettings('g1');
   assert.equal(s.dubLang, 'auto');
   assert.deepEqual(s.textTargets, ['en', 'tl']);
-  assert.deepEqual(s.expectedLangs, ['tl', 'en']);
+  assert.equal(s.expectedLangs, null); // server languages are the hints
+  assert.equal(s.captions, true);
 });
 
 test('old rows that only held the old defaults move to the new defaults; real choices are kept', () => {

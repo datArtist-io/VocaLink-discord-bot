@@ -28,10 +28,13 @@ import {
   type MessageContextMenuCommandInteraction,
   type ModalSubmitInteraction,
   type VoiceState,
+  type ButtonInteraction,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 
 import { createDecoder } from '../audio/opus.js';
 import type { EdgeConfig } from '../config.js';
+import { describe, langLabel, PANEL_LANGS, renderPanel } from './setupPanel.js';
 import { autocompleteLanguages, languageName, normalizeLang, parseLangList } from '../languages.js';
 import type { Metrics } from '../metrics/Metrics.js';
 import type { GuildSettings, Store } from '../store/Store.js';
@@ -87,6 +90,7 @@ export class TranslatorBot {
       if (i.isAutocomplete()) return await this.autocomplete(i);
       if (i.isMessageContextMenuCommand()) return await this.correctMenu(i);
       if (i.isModalSubmit() && i.customId.startsWith('correct:')) return await this.correctSubmit(i);
+      if ((i.isStringSelectMenu() || i.isButton()) && i.customId.startsWith('setup:') && i.inGuild()) return await this.onSetupPanel(i);
       if (!i.isChatInputCommand() || !i.inGuild()) return;
       this.d.metrics.inc(`cmd_${i.commandName}`);
       switch (i.commandName) {
@@ -98,6 +102,8 @@ export class TranslatorBot {
         }
         case 'mylang':
           return await this.cmdMyLang(i);
+        case 'setup':
+          return await this.cmdSetup(i);
         case 'settings':
           return await this.cmdSettings(i);
         case 'optout':
@@ -176,7 +182,7 @@ export class TranslatorBot {
     const settings = this.d.store.getSettings(guild.id);
     const textChannel = ((i.options.getChannel('captions') as GuildTextBasedChannel | null) ?? (i.channel as GuildTextBasedChannel));
     let captionsChannel: GuildTextBasedChannel = textChannel;
-    if (settings.captionsInThread && 'threads' in textChannel && textChannel.type === ChannelType.GuildText) {
+    if (settings.captions && settings.captionsInThread && 'threads' in textChannel && textChannel.type === ChannelType.GuildText) {
       try {
         captionsChannel = await textChannel.threads.create({
           name: `🌐 Live translation · ${vc.name}`.slice(0, 100),
@@ -255,7 +261,19 @@ export class TranslatorBot {
       }
     }
 
-    const privacy = this.d.cfg.privacyUrl ? ` Privacy: <${this.d.cfg.privacyUrl}>` : '';
+    const privacy = this.d.cfg.privacyUrl ? ` · [Privacy](<${this.d.cfg.privacyUrl}>)` : '';
+    if (this.d.cfg.pipeline === 'cloud') {
+      await i.editReply({
+        embeds: [{
+          title: `🔴 Live translation is on in ${vc.name}`,
+          description: describe(settings) + `\n\n-# Voices are processed live and never recorded. \`/optout\` anytime${privacy}`,
+          color: 0xed4245,
+        }],
+        allowedMentions: { parse: [] },
+      });
+      this.d.log.info('session started', { guild: guild.id, channel: vc.id });
+      return;
+    }
     const notice =
       `🔴 **Live translation is ON in ${vc}.**\n` +
       `I process what people say in this channel to show live captions and translations` +
@@ -270,6 +288,29 @@ export class TranslatorBot {
     this.d.log.info('session started', { guild: guild.id, channel: vc.id });
   }
 
+  // ------------------------------------------------------------------ /setup panel
+  private async cmdSetup(i: ChatInputCommandInteraction): Promise<void> {
+    const s = this.d.store.getSettings(i.guildId!);
+    await i.reply({ ...renderPanel(s), flags: EPH });
+  }
+
+  private async onSetupPanel(i: StringSelectMenuInteraction | ButtonInteraction): Promise<void> {
+    const gid = i.guildId!;
+    const cur = this.d.store.getSettings(gid);
+    let patch: Partial<GuildSettings> = {};
+    if (i.isStringSelectMenu() && i.customId === 'setup:langs') {
+      const picked = i.values.filter((v) => (PANEL_LANGS as readonly string[]).includes(v));
+      if (picked.length) patch = { textTargets: picked };
+    } else if (i.customId === 'setup:voice') {
+      patch = { dubLang: cur.dubLang === null ? 'auto' : null };
+    } else if (i.customId === 'setup:captions') {
+      patch = { captions: !cur.captions };
+    }
+    const s = this.d.store.updateSettings(gid, patch);
+    this.sessions.get(gid)?.session.reloadSettings();
+    await i.update(renderPanel(s));
+  }
+
   private async cmdStop(i: ChatInputCommandInteraction): Promise<void> {
     if (!this.sessions.has(i.guildId!)) {
       await i.reply({ content: 'Not translating in this server.', flags: EPH });
@@ -277,7 +318,7 @@ export class TranslatorBot {
     }
     await i.deferReply();
     await this.stop(i.guildId!, `stopped by ${i.user.username}`);
-    await i.editReply('⏹️ Live translation stopped. Captions and summary are in the caption thread.');
+    await i.editReply(this.d.cfg.pipeline === 'cloud' ? '⏹️ Live translation stopped. See you next call!' : '⏹️ Live translation stopped. Captions and summary are in the caption thread.');
   }
 
   async stop(guildId: string, reason: string): Promise<void> {

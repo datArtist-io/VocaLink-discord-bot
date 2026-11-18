@@ -244,7 +244,7 @@ export class GuildSession extends EventEmitter {
   private mainDubLangs(): string[] {
     const d = this.settings.dubLang;
     if (!d) return [];
-    if (d === 'auto') return this.settings.textTargets.slice(0, 2);
+    if (d === 'auto') return this.settings.textTargets.slice(0, 3);
     return [d];
   }
 
@@ -273,6 +273,7 @@ export class GuildSession extends EventEmitter {
       guild_id: this.guildId,
       text_targets: this.textTargets(),
       audio_targets: this.audioTargets(),
+      channel_dub_langs: this.mainDubLangs(),
       mode: s.mode,
       voice_mode: s.voiceMode,
       expected_langs: s.expectedLangs,
@@ -451,6 +452,15 @@ export class GuildSession extends EventEmitter {
           return this.onPartial(e as unknown as PartialEvent);
         case 'partial_translation':
           return this.onPartialTranslation(e as unknown as PartialTranslationEvent);
+        case 'final_translation': {
+          // a server language finished a little after the caption was finalised: fill it in
+          const u = this.utts.get(this.uttKey(Number(e.sid), Number(e.utt_id)));
+          if (u && typeof e.lang === 'string' && typeof e.text === 'string' && !u.translations[e.lang]) {
+            u.translations = { ...u.translations, [e.lang]: e.text };
+            this.render(u);
+          }
+          return;
+        }
         case 'final':
           return this.onFinal(e as unknown as FinalEvent);
         case 'tts_start':
@@ -562,7 +572,7 @@ export class GuildSession extends EventEmitter {
       name: u.name, srcLang: u.srcLang, prob: u.final ? u.prob : undefined, original: u.original, translations: shown,
       partial: !u.final, flags: u.flags, notes: u.final ? u.notes : [], voiceTier: u.tiers,
     };
-    this.d.captions?.upsert(u.key, formatCaption(data), u.final);
+    if (this.settings.captions !== false) this.d.captions?.upsert(u.key, formatCaption(data), u.final);
     this.d.hub?.caption(this.guildId, { name: u.name, userId: u.userId, srcLang: u.srcLang, original: u.original, translations: u.translations, final: u.final, uttKey: u.key });
   }
 

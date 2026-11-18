@@ -18,6 +18,8 @@ export interface Listener {
   userId: string;
   lang: string;
   sock: SocketLike;
+  /** test mode: also hear your own speech translated */
+  hearSelf?: boolean;
 }
 
 export interface HubSession {
@@ -67,6 +69,15 @@ export class WebHub {
     this.sendJson(l, { type: 'status', live: this.sessions.has(l.guildId), lang });
   }
 
+  setHearSelf(l: Listener, on: boolean): void {
+    l.hearSelf = on;
+  }
+
+  /** a listener gets this person's translations unless it is themselves (and not in test mode) */
+  private wants(l: Listener, speaker: string | undefined): boolean {
+    return l.userId !== speaker || Boolean(l.hearSelf);
+  }
+
   detach(l: Listener): void {
     this.listeners.get(l.guildId)?.delete(l);
     this.sync(l.guildId);
@@ -91,7 +102,7 @@ export class WebHub {
   caption(guildId: string, ev: { name: string; userId: string; srcLang: string; original: string; translations: Record<string, string | null>; final: boolean; uttKey: string }): void {
     for (const l of this.listeners.get(guildId) ?? []) {
       const text = l.lang === ev.srcLang ? ev.original : (ev.translations[l.lang] ?? null);
-      this.sendJson(l, { type: 'caption', key: ev.uttKey, name: ev.name, user_id: ev.userId, you: l.userId === ev.userId, src: ev.srcLang, original: ev.original, text, final: ev.final });
+      this.sendJson(l, { type: 'caption', key: ev.uttKey, name: ev.name, user_id: ev.userId, you: l.userId === ev.userId && !l.hearSelf, src: ev.srcLang, original: ev.original, text, final: ev.final });
     }
   }
 
@@ -99,19 +110,19 @@ export class WebHub {
     const owner = String(meta.user_id ?? '');
     this.dubOwner.set(Number(meta.dub_id), owner);
     if (this.dubOwner.size > 500) this.dubOwner.delete(this.dubOwner.keys().next().value!);
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && l.userId !== owner) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 24000 });
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 24000 });
   }
 
   /** Someone started/stopped talking: drives "speaking" rings, and lowers your translations while YOU talk. */
   speaking(guildId: string, userId: string, on: boolean): void {
-    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'speaking', user_id: userId, you: l.userId === userId, on });
+    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'speaking', user_id: userId, you: l.userId === userId && !l.hearSelf, on });
   }
 
   dubAudio(guildId: string, lang: string, dubId: number, seq: number, pcm48: Buffer): void {
     let pkt: Buffer | null = null;
     const owner = this.dubOwner.get(dubId);
     for (const l of this.listeners.get(guildId) ?? []) {
-      if (l.lang !== lang || l.userId === owner) continue;
+      if (l.lang !== lang || !this.wants(l, owner)) continue;
       if ((l.sock.bufferedAmount ?? 0) > 512 * 1024) {
         this.stats.dropped++;
         continue;
@@ -129,7 +140,7 @@ export class WebHub {
 
   dubEnd(guildId: string, lang: string, dubId: number): void {
     const owner = this.dubOwner.get(dubId);
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && l.userId !== owner) this.sendJson(l, { type: 'dub_end', dub_id: dubId });
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_end', dub_id: dubId });
     this.dubOwner.delete(dubId);
   }
 

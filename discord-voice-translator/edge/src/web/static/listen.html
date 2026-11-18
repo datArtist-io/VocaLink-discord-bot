@@ -48,6 +48,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
 .empty .big{font-size:40px}
 .bar{position:sticky;bottom:0;margin-top:14px;padding:12px 14px;border-radius:16px;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;gap:12px}
 .bar input{flex:1;accent-color:var(--accent)}
+.self{display:flex;align-items:center;gap:8px;justify-content:center;margin-top:12px;font-size:14px;cursor:pointer}.self span{color:var(--muted)}
 .tip{font-size:13px;color:var(--muted);text-align:center;margin-top:10px}
 .start{position:fixed;inset:0;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 85%,transparent);backdrop-filter:blur(6px)}
 .start button{font:inherit;font-size:18px;font-weight:700;padding:16px 28px;border-radius:999px;border:0;background:var(--accent);color:var(--accent-ink);cursor:pointer;box-shadow:0 8px 30px color-mix(in srgb,var(--accent) 35%,transparent)}
@@ -72,6 +73,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
       <div class="empty" id="empty"><div class="big">🎧</div>You’re all set. When someone speaks, you’ll hear them in your language.</div>
     </div>
     <div class="bar">🔈<input id="vol" type="range" min="0" max="150" value="100" aria-label="Volume">🔊</div>
+    <label class="self"><input type="checkbox" id="self"> Hear myself too <span>(for testing on your own)</span></label>
     <div class="tip">Use headphones. You never hear yourself, and translations get quieter while you talk.</div>
   </section>
 
@@ -92,6 +94,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   let lang = q.get('pick') ? '' : (localStorage.getItem('vl_lang') || '');
   let ws = null, ctx = null, master = null, duck = null;
   let playhead = 0;
+  let fails = 0;
   const dubs = new Map();            // dub id -> { user, arrived, skip, started }
   const people = new Map();          // user id -> { name, el }
   const muted = new Set();
@@ -132,6 +135,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   }
   function state(txt, live) { $('stateTxt').textContent = txt; $('state').classList.toggle('live', !!live); }
   $('mylang').onclick = showPicker;
+  $('self').onchange = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hear_self', on: $('self').checked })); };
 
   const COLORS = ['#5865f2','#eb459e','#23a55a','#f0b232','#e67e22','#00a8fc','#9b59b6','#1abc9c'];
   function person(id, name) {
@@ -211,10 +215,17 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}`);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => state('Connecting…');
-    ws.onclose = (e) => {
-      if (e.code === 4401 || e.code === 1008) { state('Link expired. Tap “Open my translator” in Discord again.'); return; }
-      state('Reconnecting…'); setTimeout(connect, 1500);
+    let opened = false;
+    ws.onopen = () => { opened = true; fails = 0; state('Connecting…'); if ($('self').checked) ws.send(JSON.stringify({ type: 'hear_self', on: true })); };
+    ws.onclose = async () => {
+      if (!opened && ++fails >= 2) {
+        // couldn't connect twice: is the link still valid?
+        try {
+          const r = await fetch('/api/languages?t=' + encodeURIComponent(token));
+          if (r.status === 401) { state('This link has expired. In Discord, tap “Open my translator” again.'); return; }
+        } catch {}
+      }
+      state('Reconnecting…'); setTimeout(connect, Math.min(1500 * fails || 1500, 8000));
     };
     ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
   }

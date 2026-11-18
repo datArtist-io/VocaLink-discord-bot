@@ -1,3 +1,5 @@
+import { decimate2 } from '../audio/pcm.js';
+
 /**
  * Fan-out of captions and translated audio to companion web listeners.
  * Each listener picks a language; the guild session adds that language to the
@@ -19,6 +21,8 @@ export interface Listener {
   sock: SocketLike;
   /** test mode: also hear your own speech translated */
   hearSelf?: boolean;
+  /** audio rate this player understands (players from before v3 only know 24 kHz) */
+  rate?: 24000 | 48000;
 }
 
 export interface HubSession {
@@ -119,7 +123,7 @@ export class WebHub {
     const owner = String(meta.user_id ?? '');
     this.dubOwner.set(Number(meta.dub_id), owner);
     if (this.dubOwner.size > 500) this.dubOwner.delete(this.dubOwner.keys().next().value!);
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 48000 });
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: l.rate ?? 24000 });
   }
 
   /** Someone started/stopped talking: drives "speaking" rings, and lowers your translations while YOU talk. */
@@ -128,7 +132,7 @@ export class WebHub {
   }
 
   dubAudio(guildId: string, lang: string, dubId: number, seq: number, pcm48: Buffer): void {
-    let pkt: Buffer | null = null;
+    const pkts: Partial<Record<24000 | 48000, Buffer>> = {};
     const owner = this.dubOwner.get(dubId);
     for (const l of this.listeners.get(guildId) ?? []) {
       if (l.lang !== lang || !this.wants(l, owner)) continue;
@@ -136,11 +140,14 @@ export class WebHub {
         this.stats.dropped++;
         continue;
       }
+      const rate = l.rate ?? 24000;
+      let pkt = pkts[rate];
       if (!pkt) {
         const h = Buffer.allocUnsafe(8);
         h.writeUInt32BE(dubId >>> 0, 0);
         h.writeUInt32BE(seq >>> 0, 4);
-        pkt = Buffer.concat([h, pcm48]); // full 48 kHz quality (no downsampling)
+        // full 48 kHz for current players; 24 kHz for players opened before the update
+        pkt = pkts[rate] = Buffer.concat([h, rate === 48000 ? pcm48 : decimate2(pcm48)]);
       }
       l.sock.send(pkt);
       this.stats.audioFramesSent++;

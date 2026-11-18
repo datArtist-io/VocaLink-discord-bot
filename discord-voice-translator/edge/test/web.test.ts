@@ -53,7 +53,7 @@ test('web server: health, pages, dashboard auth, listener websocket', async () =
     }));
 
     // good token: status, caption in listener language, binary audio, language switch
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/listen?t=${listen}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/listen?t=${listen}&v=3`); // current player (48 kHz)
     const msgs: Record<string, unknown>[] = [];
     const bins: Buffer[] = [];
     ws.on('message', (d, isBin) => (isBin ? bins.push(d as Buffer) : msgs.push(JSON.parse(String(d)))));

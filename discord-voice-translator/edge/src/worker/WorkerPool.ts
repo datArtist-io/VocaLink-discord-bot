@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 
 import { WorkerClient, type WorkerClientOptions } from './WorkerClient.js';
+import type { CloudWorker } from './CloudWorker.js';
 import type { HelloAck } from '../protocol/messages.js';
 
 export function parseWorkerUrls(spec: string): { host: string; port: number }[] {
@@ -37,10 +38,16 @@ export class WorkerPool extends EventEmitter {
     urls: { host: string; port: number }[],
     opts: Omit<WorkerClientOptions, 'host' | 'port'>,
     private readonly failoverMs = 5000,
+    prebuilt?: CloudWorker[],
   ) {
     super();
-    if (!urls.length) throw new Error('at least one worker URL is required');
-    this.clients = urls.map((u) => new WorkerClient({ ...opts, host: u.host, port: u.port }));
+    if (prebuilt?.length) {
+      // CloudWorker implements the same surface as WorkerClient (see CloudWorker.ts)
+      this.clients = prebuilt as unknown as WorkerClient[];
+    } else {
+      if (!urls.length) throw new Error('at least one worker URL is required');
+      this.clients = urls.map((u) => new WorkerClient({ ...opts, host: u.host, port: u.port }));
+    }
     for (const c of this.clients) {
       c.on('status', (s: string) => {
         if (s === 'down') this.downSince.set(c, Date.now());

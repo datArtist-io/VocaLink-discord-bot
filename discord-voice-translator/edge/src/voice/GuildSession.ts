@@ -341,6 +341,7 @@ export class GuildSession extends EventEmitter {
     const m = this.d.resolveMember(userId);
     if (!m || m.bot) return;
     this.main.humanSpeaking(userId, speaking);
+    this.d.hub?.speaking(this.guildId, userId, speaking);
     if (speaking) {
       if (this.d.store.optedOut(userId) && !this.enrollTaps.has(userId)) return;
       this.ensureSpeaker(userId, m);

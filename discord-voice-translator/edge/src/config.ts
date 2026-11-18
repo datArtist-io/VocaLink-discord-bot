@@ -71,7 +71,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { require
     dbPath: env.DB_PATH ?? '/data/edge.sqlite',
     webPort: port,
     webHost: env.WEB_HOST ?? '0.0.0.0',
-    publicUrl: (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, ''),
+    // accept "my-app.up.railway.app" as well as a full URL
+    publicUrl: ((u) => (/^https?:\/\//.test(u) ? u : `https://${u}`))(env.PUBLIC_URL || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${port}`)).replace(/\/$/, ''),
     webSecret: env.WEB_SECRET || null,
     mirrorTokens: (env.MIRROR_BOT_TOKENS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     defaultTextTargets: (env.DEFAULT_TEXT_TARGETS ?? 'en').split(',').map((s) => s.trim()).filter(Boolean),

@@ -91,6 +91,7 @@ export class TranslatorBot {
       if (i.isMessageContextMenuCommand()) return await this.correctMenu(i);
       if (i.isModalSubmit() && i.customId.startsWith('correct:')) return await this.correctSubmit(i);
       if ((i.isStringSelectMenu() || i.isButton()) && i.customId.startsWith('setup:') && i.inGuild()) return await this.onSetupPanel(i);
+      if (i.isButton() && i.customId === 'listen:open' && i.inGuild()) return await this.replyTranslator(i, null);
       if (!i.isChatInputCommand() || !i.inGuild()) return;
       this.d.metrics.inc(`cmd_${i.commandName}`);
       switch (i.commandName) {
@@ -269,6 +270,9 @@ export class TranslatorBot {
           description: describe(settings) + `\n\n-# Voices are processed live and never recorded. \`/optout\` anytime${privacy}`,
           color: 0xed4245,
         }],
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId('listen:open').setLabel('Open my translator').setEmoji('🎧').setStyle(ButtonStyle.Primary),
+        )],
         allowedMentions: { parse: [] },
       });
       this.d.log.info('session started', { guild: guild.id, channel: vc.id });
@@ -712,16 +716,26 @@ export class TranslatorBot {
   }
 
   private async cmdListen(i: ChatInputCommandInteraction): Promise<void> {
-    const pref = this.d.store.getUser(i.user.id);
     const langOpt = i.options.getString('lang');
-    const lang = (langOpt ? normalizeLang(langOpt) : null) ?? pref.hearLang ?? 'en';
-    const t = this.d.signer.sign({ g: i.guildId!, u: i.user.id, s: 'listen', l: lang }, this.d.cfg.listenTtlMs);
-    const live = this.sessions.has(i.guildId!) ? '' : '\n-# No session is running yet; the page will connect when one starts.';
+    const lang = langOpt ? normalizeLang(langOpt) : null;
+    if (lang && lang !== 'auto') this.d.store.updateUser(i.user.id, { hearLang: lang });
+    await this.replyTranslator(i, lang && lang !== 'auto' ? lang : null);
+  }
+
+  /** A private, one-tap link to this person's own translator (only they see it). */
+  private async replyTranslator(i: ChatInputCommandInteraction | ButtonInteraction, lang: string | null): Promise<void> {
+    const hear = lang ?? this.d.store.getUser(i.user.id).hearLang ?? '';
+    const t = this.d.signer.sign({ g: i.guildId!, u: i.user.id, s: 'listen', l: hear || 'en' }, this.d.cfg.listenTtlMs);
+    const url = `${this.d.cfg.publicUrl}/listen?t=${t}${hear ? '' : '&pick=1'}`;
     await i.reply({
-      content: `🎧 Your personal translated stream (${languageName(lang)}): ${this.d.cfg.publicUrl}/listen?t=${t}\nTip: in Discord, right-click foreign speakers → lower **User Volume**, then use the page's mixer.${live}`,
+      content: `🎧 **Your personal translator.** You'll hear everyone in ${hear ? `**${languageName(hear)}**` : 'your language'}, privately. Nobody else hears it, and you never hear yourself.\n-# Tip: use headphones.`,
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Open my translator').setEmoji('🎧'),
+      )],
       flags: EPH,
     });
   }
+
 
   private async cmdLanguages(i: ChatInputCommandInteraction): Promise<void> {
     const info = this.d.pool.info();

@@ -72,7 +72,7 @@ test('web server: health, pages, dashboard auth, listener websocket', async () =
     assert.equal(cap.text, 'ẹ n lẹ');
     assert.equal(bins.length, 1);
     assert.equal(bins[0]!.readUInt32BE(0), 7);
-    assert.equal(bins[0]!.length, 8 + 960); // 48k -> 24k
+    assert.equal(bins[0]!.length, 8 + 1920); // full 48 kHz quality to the player
     ws.send(JSON.stringify({ type: 'set_lang', lang: 'French' }));
     await new Promise((r) => setTimeout(r, 100));
     assert.deepEqual(langsSet.at(-1), ['fr']);

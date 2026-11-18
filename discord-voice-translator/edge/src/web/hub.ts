@@ -4,7 +4,6 @@
  * worker's audio targets while at least one listener wants it.
  */
 
-import { decimate2 } from '../audio/pcm.js';
 
 export interface SocketLike {
   send(data: string | Buffer): void;
@@ -120,7 +119,7 @@ export class WebHub {
     const owner = String(meta.user_id ?? '');
     this.dubOwner.set(Number(meta.dub_id), owner);
     if (this.dubOwner.size > 500) this.dubOwner.delete(this.dubOwner.keys().next().value!);
-    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 24000 });
+    for (const l of this.listeners.get(guildId) ?? []) if (l.lang === lang && this.wants(l, owner)) this.sendJson(l, { type: 'dub_start', ...meta, sample_rate: 48000 });
   }
 
   /** Someone started/stopped talking: drives "speaking" rings, and lowers your translations while YOU talk. */
@@ -141,7 +140,7 @@ export class WebHub {
         const h = Buffer.allocUnsafe(8);
         h.writeUInt32BE(dubId >>> 0, 0);
         h.writeUInt32BE(seq >>> 0, 4);
-        pkt = Buffer.concat([h, decimate2(pcm48)]);
+        pkt = Buffer.concat([h, pcm48]); // full 48 kHz quality (no downsampling)
       }
       l.sock.send(pkt);
       this.stats.audioFramesSent++;

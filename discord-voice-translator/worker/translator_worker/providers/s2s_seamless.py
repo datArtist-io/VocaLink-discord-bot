@@ -4,7 +4,7 @@ Implements the S2SModel interface so a direct speech->speech model can be
 swapped in for the STT->MT->TTS cascade. Not enabled by default: it is
 CC-BY-NC 4.0, large (2.3B), not streaming in this form, and loses the
 per-stage captions/glossary control the cascade gives. Enable with
-`TW__S2S__ENABLED=1` once evaluated on your languages (see docs/ARCHITECTURE.md).
+`TW__S2S__ENABLED=1` once evaluated on your languages (see docs/self-hosted/ARCHITECTURE.md).
 """
 
 from __future__ import annotations

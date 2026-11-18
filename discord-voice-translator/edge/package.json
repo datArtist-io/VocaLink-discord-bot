@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
     "start": "node dist/main.js",
     "start:sharded": "node dist/shard-manager.js",
-    "dev": "tsx src/main.ts",
+    "dev": "tsx --env-file-if-exists=.env src/main.ts",
     "register": "node dist/register-commands.js",
     "dave-spike": "node dist/dave-spike.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

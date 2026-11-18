@@ -10,7 +10,7 @@ published FLEURS/Common Voice WER figures, bucketed coarsely:
     fair  : roughly 12-35 %
     poor  : > 35 % (usable for gist captions only)
 They are replaced by measured numbers once `scripts/bench.py` has been run on
-real clips (see docs/LANGUAGES.md).
+real clips (see docs/self-hosted/LANGUAGES.md).
 """
 
 from __future__ import annotations

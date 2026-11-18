@@ -4,7 +4,7 @@ The ML libraries are replaced by small stand-in modules that record how they
 are called, so these tests check OUR side of each integration (argument
 names, token formats, sample-rate handling, HTTP request shapes). They do not
 prove the real libraries behave identically - that needs the Phase 0 run with
-real models (docs/TESTING.md).
+real models (docs/self-hosted/TESTING.md).
 """
 
 from __future__ import annotations

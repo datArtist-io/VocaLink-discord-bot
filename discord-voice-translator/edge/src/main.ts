@@ -16,6 +16,7 @@ import { MirrorManager } from './voice/Mirror.js';
 import { TokenSigner } from './web/auth.js';
 import { WebHub } from './web/hub.js';
 import { WebServer } from './web/server.js';
+import { CloudWorker } from './worker/CloudWorker.js';
 import { WorkerPool } from './worker/WorkerPool.js';
 
 async function main(): Promise<void> {
@@ -35,7 +36,21 @@ async function main(): Promise<void> {
   const signer = new TokenSigner(secret);
   const metrics = new Metrics();
   const hub = new WebHub();
-  const pool = new WorkerPool(cfg.workers, { token: cfg.workerToken, edgeId: `edge-shard${shardId}-${process.pid}`, log: log.child('worker') });
+  const cloud =
+    cfg.pipeline === 'cloud'
+      ? new CloudWorker({
+          sonioxKey: async () => cfg.cloud.sonioxApiKey,
+          sonioxUrl: cfg.cloud.sonioxUrl,
+          sonioxModel: cfg.cloud.sonioxModel,
+          elevenKey: cfg.cloud.elevenApiKey,
+          elevenVoiceId: cfg.cloud.elevenVoiceId,
+          elevenModel: cfg.cloud.elevenModel,
+          defaultLangs: cfg.cloud.defaultLangs,
+          log: log.child('cloud'),
+        })
+      : null;
+  log.info('translation pipeline', { pipeline: cfg.pipeline });
+  const pool = new WorkerPool(cfg.workers, { token: cfg.workerToken, edgeId: `edge-shard${shardId}-${process.pid}`, log: log.child('worker') }, 5000, cloud ? [cloud] : undefined);
   pool.start();
 
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });

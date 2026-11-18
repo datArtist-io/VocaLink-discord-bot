@@ -80,6 +80,8 @@ export interface GuildSessionDeps {
   metrics: Metrics;
   captions: CaptionSink | null;
   resolveMember: (userId: string) => MemberInfo | null;
+  /** Look a member up from Discord (for people the cache doesn't know yet). */
+  fetchMember?: (userId: string) => Promise<MemberInfo | null>;
   decoderFactory: () => PcmDecoder;
   log: Logger;
   botUserId: string;
@@ -338,7 +340,16 @@ export class GuildSession extends EventEmitter {
   // ------------------------------------------------------------------ uplink
   private onSpeaking = (userId: string, speaking: boolean): void => {
     if (userId === this.d.botUserId) return;
-    const m = this.d.resolveMember(userId);
+    let m = this.d.resolveMember(userId);
+    if (!m && speaking && this.d.fetchMember && !this.speakers.has(userId)) {
+      // Unknown to the cache: start listening NOW so their first sentence isn't lost, then confirm.
+      m = { name: '…', bot: false };
+      void this.d.fetchMember(userId).then((info) => {
+        const sp = this.speakers.get(userId);
+        if (!info || info.bot) this.dropUser(userId);
+        else if (sp) sp.name = info.name;
+      });
+    }
     if (!m || m.bot) return;
     this.main.humanSpeaking(userId, speaking);
     this.d.hub?.speaking(this.guildId, userId, speaking);

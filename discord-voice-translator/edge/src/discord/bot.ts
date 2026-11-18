@@ -239,6 +239,7 @@ export class TranslatorBot {
         }
         return null;
       },
+      fetchMember: (uid) => guild.members.fetch(uid).then((mm) => ({ name: mm.displayName, bot: mm.user.bot }), () => null),
       decoderFactory: createDecoder,
       log: this.d.log.child(`session-${guild.id}`),
       botUserId: this.d.client.user!.id,

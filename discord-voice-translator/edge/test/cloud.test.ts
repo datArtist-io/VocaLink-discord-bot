@@ -109,3 +109,11 @@ test('AGC lifts faint speech, caps gain and leaves silence silent', () => {
   assert.ok(agc.gain <= 6);
   assert.equal(peak(agc.process(Buffer.alloc(640))), 0);
 });
+
+test('captions never fuse words where original and translated text meet', async () => {
+  const { joinPiece } = await import('../src/worker/CloudWorker.js');
+  assert.equal('internet ko' + joinPiece('internet ko', 'sobrang bagal', true), 'internet ko sobrang bagal');
+  assert.equal('internet ko' + joinPiece('internet ko', ' sobrang', true), 'internet ko sobrang');
+  assert.equal('okay' + joinPiece('okay', ', fine', true), 'okay, fine');
+  assert.equal('pa' + joinPiece('pa', 'nalo', false), 'panalo'); // same kind of text: untouched
+});

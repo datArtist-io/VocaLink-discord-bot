@@ -482,6 +482,7 @@ export class CloudWorker extends EventEmitter {
     if (s.phraseTimer) clearTimeout(s.phraseTimer);
     s.phraseTimer = null;
     let holding = false;
+    const spoken = topLang(s.utt); // the language this person is mainly speaking right now
     for (const [lang, p] of s.utt.phrase) {
       const text = p.text.trim();
       if (!text) continue;
@@ -489,7 +490,8 @@ export class CloudWorker extends EventEmitter {
       if (force || PHRASE_END.test(text) || words >= MIN_WORDS_TO_SPEAK) {
         // speak it if any part of this utterance needed translating into `lang`
         // (keeps the English words of a Taglish sentence in an English dub)
-        if (p.translated || s.utt.translatedInto.has(lang)) this.speak(s, lang, text);
+        // never dub into the language the person is mainly speaking (so Taglish gets one dub, not two)
+        if ((p.translated || s.utt.translatedInto.has(lang)) && lang !== spoken) this.speak(s, lang, text);
         s.utt.phrase.set(lang, { text: '', translated: false });
       } else {
         holding = true;

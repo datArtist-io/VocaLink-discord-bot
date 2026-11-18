@@ -133,7 +133,7 @@ export class TranslatorBot {
 
   private async autocomplete(i: AutocompleteInteraction): Promise<void> {
     const f = i.options.getFocused(true);
-    const extra = f.name === 'speak' ? [{ name: 'Auto-detect (recommended)', value: 'auto' }] : f.name === 'dub' ? [{ name: 'Off (captions only)', value: 'off' }] : [];
+    const extra = f.name === 'speak' ? [{ name: 'Auto-detect (recommended)', value: 'auto' }] : f.name === 'dub' ? [{ name: 'Auto: everyone hears the other language (recommended)', value: 'auto' }, { name: 'Off (captions only)', value: 'off' }] : [];
     await i.respond(autocompleteLanguages(String(f.value), extra));
   }
 
@@ -259,7 +259,7 @@ export class TranslatorBot {
     const notice =
       `🔴 **Live translation is ON in ${vc}.**\n` +
       `I process what people say in this channel to show live captions and translations` +
-      `${settings.dubLang ? ` and speak them in ${languageName(settings.dubLang)}` : ''}. ` +
+      `${settings.dubLang === 'auto' ? ' and speak each one in the other language' : settings.dubLang ? ` and speak them in ${languageName(settings.dubLang)}` : ''}. ` +
       `Audio is **not recorded or stored**.${settings.summaries ? ' A text transcript is kept in memory only until the call summary is posted.' : ''} ` +
       `Don't want your voice processed? Use \`/optout\` (instant).${privacy}\n` +
       `Captions: ${captionsChannel}. Personal translated audio: \`/listen\`.` + mirrorNote;
@@ -332,7 +332,7 @@ export class TranslatorBot {
     if (a) {
       const d = a.session.describe() as { speakers: { name: string }[]; dub_queue: number; web_langs: string[]; mirrors: string[] };
       const s = a.session.settings;
-      lines.push(`Captions: ${s.textTargets.map((x) => x.toUpperCase()).join(', ')} · Dub: ${s.dubLang ? s.dubLang.toUpperCase() : 'off'} (${s.voiceMode}) · Mode: ${s.mode}`);
+      lines.push(`Captions: ${s.textTargets.map((x) => x.toUpperCase()).join(', ')} · Dub: ${s.dubLang === 'auto' ? 'auto' : s.dubLang ? s.dubLang.toUpperCase() : 'off'} (${s.voiceMode}) · Mode: ${s.mode}`);
       lines.push(`Speakers: ${d.speakers.map((x) => x.name).join(', ') || '—'} · Web listeners: ${this.d.hub.count(i.guildId!)} ${d.web_langs.length ? `(${d.web_langs.join(', ')})` : ''} · Mirrors: ${d.mirrors.join(', ') || '—'} · Dub queue: ${d.dub_queue}`);
     }
     if (info) {
@@ -399,7 +399,7 @@ export class TranslatorBot {
     const dub = i.options.getString('dub');
     if (dub !== null) {
       const d = dub === 'off' ? null : normalizeLang(dub);
-      if (dub !== 'off' && (!d || d === 'auto')) throw new Error(`Unknown language "${dub}"`);
+      if (dub !== 'off' && !d) throw new Error(`Unknown language "${dub}"`);
       patch.dubLang = d;
     }
     const mode = i.options.getString('mode');
@@ -433,7 +433,7 @@ export class TranslatorBot {
     return [
       '**Translation settings**',
       `Captions: ${s.textTargets.map((l) => `${languageName(l)} (${l})`).join(', ')}`,
-      `Voice dubbing: ${s.dubLang ? `${languageName(s.dubLang)} · ${s.voiceMode === 'clone' ? 'cloned voices of consenting speakers' : 'house voice'}` : 'off'}`,
+      `Voice dubbing: ${s.dubLang ? `${s.dubLang === 'auto' ? `auto (${s.textTargets.slice(0, 2).map(languageName).join(' ⇄ ')})` : languageName(s.dubLang)} · ${s.voiceMode === 'clone' ? 'cloned voices of consenting speakers' : 'house voice'}` : 'off'}`,
       `Mode: ${s.mode} · Summaries: ${s.summaries ? 'on' : 'off'} · Caption thread: ${s.captionsInThread ? 'on' : 'off'}`,
       `Mirror channels: ${s.mirrors ? s.mirrorLangs.join(', ') || '(no languages set)' : 'off'}`,
       `Expected languages: ${s.expectedLangs ? s.expectedLangs.join(', ') : 'auto (any of ~100)'}`,

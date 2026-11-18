@@ -15,7 +15,7 @@ import { dirname } from 'node:path';
 
 export interface GuildSettings {
   textTargets: string[];          // caption languages
-  dubLang: string | null;         // language spoken into the main channel (null = no dubbing)
+  dubLang: string | null;         // voice into the main channel: a language, 'auto' (each person hears the other language), or null (off)
   mode: 'literal' | 'natural' | 'cultural';
   voiceMode: 'house' | 'clone';
   mirrors: boolean;
@@ -25,15 +25,18 @@ export interface GuildSettings {
   captionsInThread: boolean;
 }
 
+/** Settings schema version; rows written before v2 used the old defaults. */
+const SETTINGS_VERSION = 2;
+
 export const DEFAULT_SETTINGS: GuildSettings = {
-  textTargets: ['en'],
-  dubLang: null,
+  textTargets: ['en', 'tl'],      // captions in English and Tagalog
+  dubLang: 'auto',                // dubbing on: Tagalog speech -> English voice, English speech -> Tagalog voice
   mode: 'literal',
   voiceMode: 'house',
   mirrors: false,
   mirrorLangs: [],
-  summaries: true,
-  expectedLangs: null,
+  summaries: false,               // not available in the fast cloud pipeline yet
+  expectedLangs: ['tl', 'en'],    // helps recognition of Tagalog / Taglish
   captionsInThread: true,
 };
 
@@ -117,14 +120,23 @@ export class Store {
   // ------------------------------------------------------------------ guild settings
   getSettings(guildId: string): GuildSettings {
     const r = this.db.prepare('SELECT json FROM guild_settings WHERE guild_id = ?').get(guildId) as { json: string } | undefined;
-    return { ...DEFAULT_SETTINGS, ...(r ? (JSON.parse(r.json) as Partial<GuildSettings>) : {}) };
+    const stored = r ? (JSON.parse(r.json) as Partial<GuildSettings> & { v?: number }) : {};
+    if ((stored.v ?? 1) < SETTINGS_VERSION) {
+      // values that were only the old defaults (nobody chose them) move to the new defaults
+      if (stored.dubLang === null) delete stored.dubLang;
+      if (JSON.stringify(stored.textTargets) === '["en"]') delete stored.textTargets;
+      if (stored.summaries === true) delete stored.summaries;
+      if (stored.expectedLangs === null) delete stored.expectedLangs;
+    }
+    delete stored.v;
+    return { ...DEFAULT_SETTINGS, ...stored };
   }
 
   updateSettings(guildId: string, patch: Partial<GuildSettings>): GuildSettings {
     const s = { ...this.getSettings(guildId), ...patch };
     this.db
       .prepare('INSERT INTO guild_settings(guild_id, json, updated_at) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at')
-      .run(guildId, JSON.stringify(s), Date.now());
+      .run(guildId, JSON.stringify({ ...s, v: SETTINGS_VERSION }), Date.now());
     return s;
   }
 

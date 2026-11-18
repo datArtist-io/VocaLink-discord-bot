@@ -171,6 +171,21 @@ Findings:
   separate MT measured from Railway.
 * Clips were computer-generated voices; real Discord audio is still needed.
 
+## 11b. Measured on Railway, Singapore (18 Nov 2026, `BENCH=1`, Taglish clip at 1x)
+
+| Stage | p50 | p90 | Notes |
+|---|---|---|---|
+| ElevenLabs Flash v2.5, first audio byte | 122 ms | 135 ms | not a bottleneck |
+| Soniox stt-rt-v6: translated text after the source phrase ends | 1142 ms | 1165 ms | US-region project; full Taglish sentence correct |
+| Soniox: word first seen / final | 1321 / 1613 ms | 1734 / 1984 ms | |
+| Deepgram nova-3 `tl`: word first seen / final | 687 / 2111 ms | 1517 / 3260 ms | dropped a whole sentence; needs separate MT |
+| Gemini 2.x Flash(-Lite) | n/a | n/a | models retired for new users |
+
+Decision: stay on Soniox (faster *final* text, far more accurate, translation included). Estimated
+phrase end → translated voice ≈ 1.14 s + 0.12 s + ~0.1 s playout ≈ **1.35 s**.
+Next speed lever: a Soniox **Japan-region** project (`stt-rt.jp.soniox.com`, set `SONIOX_WS_URL`)
+to cut the Singapore→US round trip.
+
 ## 12. Open questions
 
 1. Which Discord servers will be the first test servers, and how many people are usually in a call?

@@ -45,6 +45,7 @@ async function main(): Promise<void> {
           elevenKey: cfg.cloud.elevenApiKey,
           elevenVoiceId: cfg.cloud.elevenVoiceId,
           elevenModel: cfg.cloud.elevenModel,
+          elevenConcurrency: cfg.cloud.elevenConcurrency,
           defaultLangs: cfg.cloud.defaultLangs,
           log: log.child('cloud'),
         })

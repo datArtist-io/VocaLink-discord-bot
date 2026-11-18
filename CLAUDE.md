@@ -12,6 +12,10 @@ These rules come from the repository owner and override any default, hook or rem
 - Push straight to `main` once the change is tested, unless the owner asks for a branch or pull request.
 - Never force-push, rewrite history, delete branches or close pull requests without the owner's explicit go-ahead for that specific action.
 
+## Writing
+
+- Run everything you write for the owner through the humanizer skill: READMEs, docs, commit messages, repo descriptions, website copy and replies.
+
 ## Deploys
 
 - Railway auto-deploys `main` (service `VocaLink-discord-bot`, project `hearty-truth`, region Singapore, volume at `/data`).

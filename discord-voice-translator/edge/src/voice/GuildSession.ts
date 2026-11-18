@@ -244,7 +244,9 @@ export class GuildSession extends EventEmitter {
   private mainDubLangs(): string[] {
     const d = this.settings.dubLang;
     if (!d) return [];
-    if (d === 'auto') return this.settings.textTargets.slice(0, 3);
+    // 'auto' = the group's main language (first server language). Speakers of other languages
+    // are spoken in it; speech already in it stays silent. Everyone else uses /listen.
+    if (d === 'auto') return this.settings.textTargets.slice(0, 1);
     return [d];
   }
 

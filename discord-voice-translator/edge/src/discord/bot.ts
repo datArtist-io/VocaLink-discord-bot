@@ -301,8 +301,9 @@ export class TranslatorBot {
     if (i.isStringSelectMenu() && i.customId === 'setup:langs') {
       const picked = i.values.filter((v) => (PANEL_LANGS as readonly string[]).includes(v));
       if (picked.length) patch = { textTargets: picked };
-    } else if (i.customId === 'setup:voice') {
-      patch = { dubLang: cur.dubLang === null ? 'auto' : null };
+    } else if (i.isStringSelectMenu() && i.customId === 'setup:voice') {
+      const v = i.values[0];
+      patch = { dubLang: v === 'off' ? null : v && cur.textTargets.includes(v) ? v : 'auto' };
     } else if (i.customId === 'setup:captions') {
       patch = { captions: !cur.captions };
     }

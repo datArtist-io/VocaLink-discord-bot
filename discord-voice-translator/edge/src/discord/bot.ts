@@ -7,6 +7,7 @@ import { randomInt } from 'node:crypto';
 import {
   ActionRowBuilder,
   ButtonBuilder,
+  StringSelectMenuBuilder,
   ButtonStyle,
   ChannelType,
   ComponentType,
@@ -34,7 +35,7 @@ import {
 
 import { createDecoder } from '../audio/opus.js';
 import type { EdgeConfig } from '../config.js';
-import { describe, langLabel, PANEL_LANGS, renderPanel } from './setupPanel.js';
+import { describe, flag, langLabel, PANEL_LANGS, renderPanel } from './setupPanel.js';
 import { autocompleteLanguages, languageName, normalizeLang, parseLangList } from '../languages.js';
 import type { Metrics } from '../metrics/Metrics.js';
 import type { GuildSettings, Store } from '../store/Store.js';
@@ -92,6 +93,8 @@ export class TranslatorBot {
       if (i.isModalSubmit() && i.customId.startsWith('correct:')) return await this.correctSubmit(i);
       if ((i.isStringSelectMenu() || i.isButton()) && i.customId.startsWith('setup:') && i.inGuild()) return await this.onSetupPanel(i);
       if (i.isButton() && i.customId === 'listen:open' && i.inGuild()) return await this.replyTranslator(i, null);
+      if (i.isStringSelectMenu() && i.customId === 'listen:lang' && i.inGuild()) return await this.onTranslatorLang(i);
+      if (i.isButton() && (i.customId === 'listen:vol:+' || i.customId === 'listen:vol:-') && i.inGuild()) return await this.onTranslatorVolume(i);
       if (!i.isChatInputCommand() || !i.inGuild()) return;
       this.d.metrics.inc(`cmd_${i.commandName}`);
       switch (i.commandName) {
@@ -723,19 +726,59 @@ export class TranslatorBot {
     await this.replyTranslator(i, lang && lang !== 'auto' ? lang : null);
   }
 
-  /** A private, one-tap link to this person's own translator (only they see it). */
-  private async replyTranslator(i: ChatInputCommandInteraction | ButtonInteraction, lang: string | null): Promise<void> {
-    const hear = lang ?? this.d.store.getUser(i.user.id).hearLang ?? '';
-    const t = this.d.signer.sign({ g: i.guildId!, u: i.user.id, s: 'listen', l: hear || 'en' }, this.d.cfg.listenTtlMs);
-    const url = `${this.d.cfg.publicUrl}/listen?t=${t}${hear ? '' : '&pick=1'}`;
-    await i.reply({
-      content: `🎧 **Your personal translator.** You'll hear everyone in ${hear ? `**${languageName(hear)}**` : 'your language'}, privately. Nobody else hears it, and you never hear yourself.\n-# Tip: use headphones.`,
-      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Open my translator').setEmoji('🎧'),
-      )],
-      flags: EPH,
-    });
+  /** The personal translator, in Discord: a language dropdown (with flags) + an Open button. Only you see it. */
+  private translatorPanel(guildId: string, userId: string) {
+    const hear = this.d.store.getUser(userId).hearLang;
+    const lang = hear && (PANEL_LANGS as readonly string[]).includes(hear) ? hear : null;
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('listen:lang')
+      .setPlaceholder('🌐 Choose the language you want to hear')
+      .addOptions(PANEL_LANGS.map((l) => ({ label: langLabel(l).replace(/^\S+\s/, ''), value: l, emoji: flag(l), default: l === lang })));
+    const rows: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[] = [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)];
+    const vol = this.volumeOf(userId);
+    rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('listen:vol:-').setEmoji('🔉').setLabel('Quieter').setStyle(ButtonStyle.Secondary).setDisabled(vol <= 10),
+      new ButtonBuilder().setCustomId('listen:vol:show').setLabel(`Volume ${vol}%`).setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId('listen:vol:+').setEmoji('🔊').setLabel('Louder').setStyle(ButtonStyle.Secondary).setDisabled(vol >= 200),
+    ));
+    if (lang) {
+      const t = this.d.signer.sign({ g: guildId, u: userId, s: 'listen', l: lang }, this.d.cfg.listenTtlMs);
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(`${this.d.cfg.publicUrl}/listen?t=${t}&lang=${lang}&vol=${vol}`).setLabel(`Open my translator · ${langLabel(lang)}`),
+      ));
+    }
+    const content = lang
+      ? `🎧 **Your personal translator.** You'll hear everyone in ${langLabel(lang)}, privately.\n-# Only you hear it. You never hear yourself. Use headphones.`
+      : '🎧 **Your personal translator.** Which language do you want to hear?';
+    return { content, components: rows };
   }
+
+  private async replyTranslator(i: ChatInputCommandInteraction | ButtonInteraction, _lang: string | null): Promise<void> {
+    await i.reply({ ...this.translatorPanel(i.guildId!, i.user.id), flags: EPH });
+  }
+
+  private volumeOf(userId: string): number {
+    const v = Number(this.d.store.getKv(`vol:${userId}`) ?? 100);
+    return Number.isFinite(v) ? Math.min(200, Math.max(10, v)) : 100;
+  }
+
+  private async onTranslatorVolume(i: ButtonInteraction): Promise<void> {
+    const step = i.customId.endsWith('+') ? 20 : -20;
+    const v = Math.min(200, Math.max(10, this.volumeOf(i.user.id) + step));
+    this.d.store.setKv(`vol:${i.user.id}`, String(v));
+    this.d.hub.setUserVolume(i.guildId!, i.user.id, v); // an open player follows instantly
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
+  private async onTranslatorLang(i: StringSelectMenuInteraction): Promise<void> {
+    const l = i.values[0];
+    if (l && (PANEL_LANGS as readonly string[]).includes(l)) {
+      this.d.store.updateUser(i.user.id, { hearLang: l });
+      this.d.hub.setUserLang(i.guildId!, i.user.id, l); // an open player switches instantly
+    }
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
 
 
   private async cmdLanguages(i: ChatInputCommandInteraction): Promise<void> {

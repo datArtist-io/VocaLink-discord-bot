@@ -66,13 +66,13 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   <section id="live" class="hide">
     <header>
       <span class="pill" id="state"><span class="dot"></span><span id="stateTxt">Connecting…</span></span>
-      <span class="pill me" id="mylang" title="Change language"></span>
+      <span class="pill me" id="mylang" title="Change your language in Discord"></span>
     </header>
     <div class="people" id="people"></div>
     <div class="feed" id="feed">
       <div class="empty" id="empty"><div class="big">🎧</div>You’re all set. When someone speaks, you’ll hear them in your language.</div>
     </div>
-    <div class="bar">🔈<input id="vol" type="range" min="0" max="150" value="100" aria-label="Volume">🔊</div>
+    <div class="bar">🔈<input id="vol" type="range" min="0" max="200" value="100" aria-label="Volume">🔊</div>
     <label class="self"><input type="checkbox" id="self"> Hear myself too <span>(for testing on your own)</span></label>
     <div class="tip">Use headphones. You never hear yourself, and translations get quieter while you talk.</div>
   </section>
@@ -91,7 +91,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   let names = { en:'English', tl:'Filipino', es:'Spanish', fr:'French', pt:'Portuguese', de:'German', it:'Italian', ja:'Japanese', ko:'Korean', zh:'Chinese', hi:'Hindi', id:'Indonesian', ms:'Malay', vi:'Vietnamese', ar:'Arabic', ru:'Russian', tr:'Turkish', pl:'Polish', nl:'Dutch', sv:'Swedish', uk:'Ukrainian', ro:'Romanian', el:'Greek', cs:'Czech', ta:'Tamil' };
   const langName = (l) => l === 'tl' ? 'Filipino' : (names[l] || l.toUpperCase());
 
-  let lang = q.get('pick') ? '' : (localStorage.getItem('vl_lang') || '');
+  let lang = q.get('lang') || (q.get('pick') ? '' : (localStorage.getItem('vl_lang') || ''));
   let ws = null, ctx = null, master = null, duck = null;
   let playhead = 0;
   let fails = 0;
@@ -134,7 +134,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     if (!ctx || ctx.state !== 'running') $('startOv').classList.remove('hide');
   }
   function state(txt, live) { $('stateTxt').textContent = txt; $('state').classList.toggle('live', !!live); }
-  $('mylang').onclick = showPicker;
+  // the language is chosen in Discord (dropdown); the player follows it live
   $('self').onchange = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hear_self', on: $('self').checked })); };
 
   const COLORS = ['#5865f2','#eb459e','#23a55a','#f0b232','#e67e22','#00a8fc','#9b59b6','#1abc9c'];
@@ -174,7 +174,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       duck = ctx.createGain(); master = ctx.createGain();
       duck.connect(master); master.connect(ctx.destination);
-      master.gain.value = $('vol').value / 100;
+      master.gain.value = (Number(q.get('vol')) || Number($('vol').value)) / 100;
     }
     await ctx.resume();
     $('startOv').classList.add('hide');
@@ -230,13 +230,18 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
   }
   function onJson(m) {
-    if (m.type === 'status') state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
+    if (m.type === 'status') {
+      state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
+      if (m.lang && m.lang !== lang) { lang = m.lang; try { localStorage.setItem('vl_lang', lang); } catch {} $('mylang').textContent = `${flag(lang)} ${langName(lang)}`; }
+    }
     else if (m.type === 'caption') caption(m);
     else if (m.type === 'dub_start') dubs.set(m.dub_id, { user: m.user_id, skip: false, started: false });
     else if (m.type === 'dub_end') setTimeout(() => dubs.delete(m.dub_id), 10000);
     else if (m.type === 'speaking') speaking(m);
+    else if (m.type === 'volume') { $('vol').value = m.value; if (master) master.gain.setTargetAtTime(m.value / 100, ctx.currentTime, 0.05); }
   }
 
+  if (q.get('vol')) $('vol').value = q.get('vol');
   // ---------------------------------------------------------------- go
   if (!token) { document.body.innerHTML = '<div class="wrap"><p class="empty">Open your translator from Discord: tap <b>🎧 Open my translator</b>.</p></div>'; return; }
   loadNames().then(() => { if (lang) { showLive(); connect(); } else showPicker(); });

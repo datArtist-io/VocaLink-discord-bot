@@ -2,134 +2,233 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Live Translation Listener</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1013">
+<title>VocaLink · My translator</title>
 <style>
-:root{--bg:#f6f7f9;--panel:#fff;--ink:#14171c;--muted:#5d6570;--line:#e3e6ea;--accent:#4f5bd5;--accent-ink:#fff;--ok:#1f8a4c;--warn:#b26b00;--chip:#eef0fb}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--panel:#171a21;--ink:#e8ebf0;--muted:#9aa3ad;--line:#262b35;--accent:#7b86ff;--accent-ink:#0f1115;--ok:#47c27c;--warn:#f0a43a;--chip:#232845}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-header{position:sticky;top:0;z-index:2;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-h1{font-size:16px;margin:0 auto 0 0}.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block;margin-right:6px}.live .dot{background:var(--ok)}
-main{max-width:760px;margin:0 auto;padding:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
-label{font-size:13px;color:var(--muted);display:block;margin-bottom:4px}
-select,input[type=range]{width:100%}select{padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:inherit}
-button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
-button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media (max-width:560px){.row{grid-template-columns:1fr}}
-.hint{font-size:13px;color:var(--muted)}
-#speakers{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:var(--chip);border-radius:999px;padding:4px 10px;font-size:13px;cursor:pointer;border:1px solid transparent}.chip.muted{opacity:.45;text-decoration:line-through}
-#caps{display:flex;flex-direction:column;gap:8px}.cap{border-left:3px solid var(--line);padding:4px 10px}.cap.final{border-color:var(--accent)}
-.cap .who{font-weight:600;font-size:13px}.cap .src{color:var(--muted);font-size:12px;margin-left:6px}.cap .orig{color:var(--muted);font-size:13px}.cap.partial .txt{font-style:italic;color:var(--muted)}
-#notice{color:var(--warn);font-size:13px;min-height:1em}
-.meter{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}.meter>i{display:block;height:100%;width:0;background:var(--ok);transition:width .1s}
+:root{--bg:#f4f5f7;--panel:#ffffff;--ink:#121418;--muted:#6a717c;--line:#e4e6ea;--accent:#5865f2;--accent-ink:#fff;--live:#23a55a;--soft:#eef0fe;--you:#f2f3f5}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1013;--panel:#17191e;--ink:#eef0f3;--muted:#9097a1;--line:#262a31;--accent:#7984ff;--accent-ink:#0e1013;--live:#3ccf7a;--soft:#1e2233;--you:#1b1d22}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:640px;margin:0 auto;padding:16px 16px calc(24px + env(safe-area-inset-bottom))}
+.hide{display:none!important}
+
+/* first run: pick your language */
+#pick h1{font-size:26px;line-height:1.2;margin:28px 0 6px}
+#pick p{color:var(--muted);margin:0 0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.lang{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:var(--panel);border:1px solid var(--line);font:inherit;color:inherit;cursor:pointer;text-align:left}
+.lang:hover{border-color:var(--accent)}
+.lang .f{font-size:22px}
+
+/* live view */
+header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:14px;font-weight:600}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.live .dot{background:var(--live);box-shadow:0 0 0 0 var(--live);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--live) 60%,transparent)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.me{margin-left:auto;cursor:pointer;background:var(--soft);border-color:transparent}
+.people{display:flex;gap:12px;overflow-x:auto;padding:4px 2px 14px;scrollbar-width:none}
+.person{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:58px;cursor:pointer;font-size:12px;color:var(--muted)}
+.av{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff;font-size:18px;outline:3px solid transparent;outline-offset:2px;transition:outline-color .15s}
+.person.talking .av{outline-color:var(--live)}
+.person.muted{opacity:.4}
+.feed{display:flex;flex-direction:column;gap:10px}
+.msg{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px 14px;animation:in .18s ease-out}
+@keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.msg .who{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:2px}
+.msg .who b{color:var(--ink);font-weight:600}
+.msg .txt{font-size:18px;line-height:1.4}
+.msg.partial .txt{color:var(--muted)}
+.msg .orig{font-size:13px;color:var(--muted);margin-top:4px}
+.msg.you{background:var(--you)}
+.msg.you .txt{font-size:15px;color:var(--muted)}
+.empty{color:var(--muted);text-align:center;padding:48px 12px}
+.empty .big{font-size:40px}
+.bar{position:sticky;bottom:0;margin-top:14px;padding:12px 14px;border-radius:16px;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;gap:12px}
+.bar input{flex:1;accent-color:var(--accent)}
+.tip{font-size:13px;color:var(--muted);text-align:center;margin-top:10px}
+.start{position:fixed;inset:0;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 85%,transparent);backdrop-filter:blur(6px)}
+.start button{font:inherit;font-size:18px;font-weight:700;padding:16px 28px;border-radius:999px;border:0;background:var(--accent);color:var(--accent-ink);cursor:pointer;box-shadow:0 8px 30px color-mix(in srgb,var(--accent) 35%,transparent)}
 </style>
 </head>
 <body>
-<header id="hdr"><h1><span class="dot"></span><span id="status">Connecting…</span></h1><button id="start">▶ Start audio</button></header>
-<main>
-  <div class="card">
-    <div class="row">
-      <div><label for="lang">I want to hear</label><select id="lang"></select></div>
-      <div><label for="vol">Translated voice volume</label><input id="vol" type="range" min="0" max="150" value="100"><div class="meter"><i id="lvl"></i></div></div>
+<div class="wrap">
+
+  <section id="pick" class="hide">
+    <h1>Which language do you want to hear?</h1>
+    <p>Everyone else will be translated into it, just for you.</p>
+    <div class="grid" id="langs"></div>
+  </section>
+
+  <section id="live" class="hide">
+    <header>
+      <span class="pill" id="state"><span class="dot"></span><span id="stateTxt">Connecting…</span></span>
+      <span class="pill me" id="mylang" title="Change language"></span>
+    </header>
+    <div class="people" id="people"></div>
+    <div class="feed" id="feed">
+      <div class="empty" id="empty"><div class="big">🎧</div>You’re all set. When someone speaks, you’ll hear them in your language.</div>
     </div>
-    <p class="hint">This page plays translations only. To hear <em>only</em> the translation, lower foreign speakers in Discord (right-click a user → <b>User Volume</b>). Tap a speaker below to mute their dubs here.</p>
-    <div id="speakers"></div>
-    <label style="margin-top:10px"><input type="checkbox" id="showOrig" checked> Show original text</label>
-  </div>
-  <div id="notice"></div>
-  <div class="card"><div id="caps"><p class="hint">Captions appear here when someone speaks.</p></div></div>
-</main>
+    <div class="bar">🔈<input id="vol" type="range" min="0" max="150" value="100" aria-label="Volume">🔊</div>
+    <div class="tip">Use headphones. You never hear yourself, and translations get quieter while you talk.</div>
+  </section>
+
+</div>
+<div class="start hide" id="startOv"><button id="startBtn">▶ Start listening</button></div>
+
 <script>
 (() => {
   const q = new URLSearchParams(location.search);
   const token = q.get('t');
   const $ = (id) => document.getElementById(id);
-  let ctx = null, gain = null, analyser = null, ws = null, lang = q.get('lang') || '';
-  const muted = new Set(); const dubUser = new Map(); const names = new Map();
-  let playhead = 0; const JITTER = 0.08;
-  const status = (txt, live) => { $('status').textContent = txt; $('hdr').classList.toggle('live', !!live); };
+  const FLAGS = { en:'🇺🇸', tl:'🇵🇭', es:'🇪🇸', fr:'🇫🇷', pt:'🇧🇷', de:'🇩🇪', it:'🇮🇹', ja:'🇯🇵', ko:'🇰🇷', zh:'🇨🇳', hi:'🇮🇳', id:'🇮🇩', ms:'🇲🇾', vi:'🇻🇳', ar:'🇸🇦', ru:'🇷🇺', tr:'🇹🇷', pl:'🇵🇱', nl:'🇳🇱', sv:'🇸🇪', uk:'🇺🇦', ro:'🇷🇴', el:'🇬🇷', cs:'🇨🇿', ta:'🇮🇳', da:'🇩🇰', fi:'🇫🇮', no:'🇳🇴', hu:'🇭🇺', bg:'🇧🇬', hr:'🇭🇷', sk:'🇸🇰' };
+  const TOP = ['en','tl','es','fr','pt','de','ja','ko','zh','hi','id','vi','ar','ru','it','tr'];
+  const flag = (l) => FLAGS[l] || '🌐';
+  let names = { en:'English', tl:'Filipino', es:'Spanish', fr:'French', pt:'Portuguese', de:'German', it:'Italian', ja:'Japanese', ko:'Korean', zh:'Chinese', hi:'Hindi', id:'Indonesian', ms:'Malay', vi:'Vietnamese', ar:'Arabic', ru:'Russian', tr:'Turkish', pl:'Polish', nl:'Dutch', sv:'Swedish', uk:'Ukrainian', ro:'Romanian', el:'Greek', cs:'Czech', ta:'Tamil' };
+  const langName = (l) => l === 'tl' ? 'Filipino' : (names[l] || l.toUpperCase());
 
-  async function loadLangs() {
+  let lang = q.get('pick') ? '' : (localStorage.getItem('vl_lang') || '');
+  let ws = null, ctx = null, master = null, duck = null;
+  let playhead = 0;
+  const dubs = new Map();            // dub id -> { user, arrived, skip, started }
+  const people = new Map();          // user id -> { name, el }
+  const muted = new Set();
+  const STALE_S = 3;                 // a translation that would start >3 s late is skipped: stay real-time
+
+  // ---------------------------------------------------------------- language picker
+  async function loadNames() {
     try {
       const r = await fetch('/api/languages?t=' + encodeURIComponent(token));
-      if (!r.ok) throw new Error((await r.json()).error || r.status);
-      const { languages } = await r.json();
-      const sel = $('lang'); sel.innerHTML = '';
-      const tierLabel = { 1: 'cloned voice', 2: 'voice', 3: 'captions only', 0: 'unavailable' };
-      Object.entries(languages).sort((a, b) => a[1].name.localeCompare(b[1].name)).forEach(([code, l]) => {
-        if (l.tier === 0) return;
-        const o = document.createElement('option'); o.value = code; o.textContent = `${l.name} — ${tierLabel[l.tier]}`; sel.appendChild(o);
-      });
-      if (lang) sel.value = lang;
-    } catch (e) { status('Link invalid or expired — run /listen again in Discord'); throw e; }
+      if (r.ok) for (const [c, v] of Object.entries((await r.json()).languages || {})) names[c] = names[c] || v.name;
+    } catch {}
+  }
+  function showPicker() {
+    const codes = [...new Set([...TOP, ...Object.keys(names)])].filter((c) => names[c] || TOP.includes(c));
+    $('langs').innerHTML = '';
+    for (const c of codes) {
+      const b = document.createElement('button'); b.className = 'lang';
+      b.innerHTML = `<span class="f">${flag(c)}</span><span>${langName(c)}</span>`;
+      b.onclick = () => choose(c);
+      $('langs').appendChild(b);
+    }
+    $('live').classList.add('hide'); $('pick').classList.remove('hide');
+  }
+  async function choose(c) {
+    lang = c; try { localStorage.setItem('vl_lang', c); } catch {}
+    $('pick').classList.add('hide');
+    await startAudio();               // the tap that picked a language also unlocks audio
+    showLive();
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'set_lang', lang }));
+    else connect();
   }
 
+  // ---------------------------------------------------------------- live view
+  function showLive() {
+    $('mylang').textContent = `${flag(lang)} ${langName(lang)}`;
+    $('live').classList.remove('hide');
+    if (!ctx || ctx.state !== 'running') $('startOv').classList.remove('hide');
+  }
+  function state(txt, live) { $('stateTxt').textContent = txt; $('state').classList.toggle('live', !!live); }
+  $('mylang').onclick = showPicker;
+
+  const COLORS = ['#5865f2','#eb459e','#23a55a','#f0b232','#e67e22','#00a8fc','#9b59b6','#1abc9c'];
+  function person(id, name) {
+    let p = people.get(id);
+    if (p) { if (name && p.name !== name) { p.name = name; p.el.querySelector('span').textContent = name; } return p; }
+    const el = document.createElement('div'); el.className = 'person';
+    const col = COLORS[[...id].reduce((a, ch) => a + ch.charCodeAt(0), 0) % COLORS.length];
+    el.innerHTML = `<div class="av" style="background:${col}">${(name || '?').trim()[0]?.toUpperCase() || '?'}</div><span></span>`;
+    el.querySelector('span').textContent = name || '…';
+    el.title = 'Tap to mute / unmute their translation';
+    el.onclick = () => { muted.has(id) ? muted.delete(id) : muted.add(id); el.classList.toggle('muted', muted.has(id)); };
+    $('people').appendChild(el);
+    p = { name, el }; people.set(id, p); return p;
+  }
+
+  function caption(m) {
+    if (m.you) return;                // your own words aren't news to you
+    person(m.user_id, m.name);
+    $('empty')?.remove();
+    let el = document.getElementById('c-' + m.key);
+    if (!el) { el = document.createElement('div'); el.id = 'c-' + m.key; $('feed').prepend(el); }
+    el.className = 'msg' + (m.final ? '' : ' partial');
+    const same = m.src === lang;
+    const txt = same ? m.original : (m.text || (m.final ? m.original : '…'));
+    el.innerHTML = '<div class="who"><b></b><span></span></div><div class="txt"></div>';
+    el.querySelector('b').textContent = m.name;
+    el.querySelector('.who span').textContent = same ? '' : `${flag(m.src)} → ${flag(lang)}`;
+    el.querySelector('.txt').textContent = txt;
+    if (!same && m.final && m.text) { const o = document.createElement('div'); o.className = 'orig'; o.textContent = m.original; el.appendChild(o); }
+    const feed = $('feed'); while (feed.children.length > 80) feed.lastElementChild.remove();
+  }
+
+  // ---------------------------------------------------------------- audio
+  async function startAudio() {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      duck = ctx.createGain(); master = ctx.createGain();
+      duck.connect(master); master.connect(ctx.destination);
+      master.gain.value = $('vol').value / 100;
+    }
+    await ctx.resume();
+    $('startOv').classList.add('hide');
+    try { await navigator.wakeLock?.request('screen'); } catch {}
+  }
+  $('startBtn').onclick = startAudio;
+  $('vol').oninput = () => { if (master) master.gain.setTargetAtTime($('vol').value / 100, ctx.currentTime, 0.05); };
+
+  function onAudio(buf) {
+    if (!ctx || ctx.state !== 'running') return;
+    const dv = new DataView(buf); const id = dv.getUint32(0);
+    const d = dubs.get(id) || { user: null, skip: false, started: false };
+    if (d.skip || muted.has(d.user)) return;
+    const now = ctx.currentTime;
+    if (!d.started) {
+      if (playhead - now > STALE_S) { d.skip = true; dubs.set(id, d); return; }   // too far behind: skip, stay live
+      d.started = true; dubs.set(id, d);
+    }
+    const pcm = new Int16Array(buf, 8); const f = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+    const b = ctx.createBuffer(1, f.length, 24000); b.copyToChannel(f, 0);
+    const s = ctx.createBufferSource(); s.buffer = b; s.connect(duck);
+    if (playhead < now + 0.02) playhead = now + 0.06;
+    s.start(playhead); playhead += b.duration;
+  }
+
+  function speaking(m) {
+    if (m.you) {
+      // you're talking: others' translations step back so they never talk over you
+      if (duck) duck.gain.setTargetAtTime(m.on ? 0.3 : 1, ctx.currentTime, m.on ? 0.04 : 0.25);
+      return;
+    }
+    const p = people.get(m.user_id); if (p) p.el.classList.toggle('talking', !!m.on);
+  }
+
+  // ---------------------------------------------------------------- connection
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}`);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => status('Connected', true);
-    ws.onclose = () => { status('Disconnected — retrying…'); setTimeout(connect, 2000); };
+    ws.onopen = () => state('Connecting…');
+    ws.onclose = (e) => {
+      if (e.code === 4401 || e.code === 1008) { state('Link expired. Tap “Open my translator” in Discord again.'); return; }
+      state('Reconnecting…'); setTimeout(connect, 1500);
+    };
     ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
   }
-
   function onJson(m) {
-    if (m.type === 'status') { status(m.live ? `Live · ${m.lang.toUpperCase()}` : 'Waiting for a translation session…', m.live); if (m.lang) { lang = m.lang; $('lang').value = m.lang; } }
+    if (m.type === 'status') state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
     else if (m.type === 'caption') caption(m);
-    else if (m.type === 'dub_start') { dubUser.set(m.dub_id, m.user_id); }
-    else if (m.type === 'dub_end') { setTimeout(() => dubUser.delete(m.dub_id), 5000); }
-    else if (m.type === 'notice') { $('notice').textContent = m.message; }
+    else if (m.type === 'dub_start') dubs.set(m.dub_id, { user: m.user_id, skip: false, started: false });
+    else if (m.type === 'dub_end') setTimeout(() => dubs.delete(m.dub_id), 10000);
+    else if (m.type === 'speaking') speaking(m);
   }
 
-  function speakerChip(id, name) {
-    if (names.has(id)) return; names.set(id, name);
-    const c = document.createElement('span'); c.className = 'chip'; c.textContent = name;
-    c.onclick = () => { muted.has(id) ? muted.delete(id) : muted.add(id); c.classList.toggle('muted', muted.has(id)); };
-    $('speakers').appendChild(c);
-  }
-
-  function caption(m) {
-    speakerChip(m.user_id, m.name);
-    const box = $('caps'); if (box.firstElementChild?.classList.contains('hint')) box.innerHTML = '';
-    let el = document.getElementById('c-' + m.key);
-    if (!el) { el = document.createElement('div'); el.id = 'c-' + m.key; el.className = 'cap'; box.prepend(el); }
-    el.className = 'cap ' + (m.final ? 'final' : 'partial');
-    const txt = m.text ?? (m.src === lang ? m.original : '…');
-    el.innerHTML = '';
-    const who = document.createElement('div'); who.className = 'who'; who.textContent = m.name;
-    const src = document.createElement('span'); src.className = 'src'; src.textContent = m.src.toUpperCase(); who.appendChild(src);
-    const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt;
-    el.append(who, t);
-    if ($('showOrig').checked && m.src !== lang) { const o = document.createElement('div'); o.className = 'orig'; o.textContent = m.original; el.appendChild(o); }
-    while (box.children.length > 60) box.lastElementChild.remove();
-  }
-
-  function onAudio(buf) {
-    if (!ctx) return;
-    const dv = new DataView(buf); const dubId = dv.getUint32(0);
-    if (muted.has(dubUser.get(dubId))) return;
-    const pcm = new Int16Array(buf, 8); const f = new Float32Array(pcm.length);
-    for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
-    const b = ctx.createBuffer(1, f.length, 24000); b.copyToChannel(f, 0);
-    const s = ctx.createBufferSource(); s.buffer = b; s.connect(gain);
-    const now = ctx.currentTime; if (playhead < now + 0.01) playhead = now + JITTER;
-    s.start(playhead); playhead += b.duration;
-  }
-
-  function meter() {
-    if (analyser) { const a = new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(a); let m = 0; for (const v of a) m = Math.max(m, Math.abs(v - 128)); $('lvl').style.width = Math.min(100, m * 1.6) + '%'; }
-    requestAnimationFrame(meter);
-  }
-
-  $('start').onclick = async () => {
-    if (!ctx) { ctx = new AudioContext(); gain = ctx.createGain(); analyser = ctx.createAnalyser(); gain.connect(analyser); analyser.connect(ctx.destination); gain.gain.value = $('vol').value / 100; meter(); }
-    await ctx.resume(); $('start').textContent = '🔊 Audio on'; $('start').classList.add('ghost');
-  };
-  $('vol').oninput = () => { if (gain) gain.gain.value = $('vol').value / 100; };
-  $('lang').onchange = () => { lang = $('lang').value; ws?.send(JSON.stringify({ type: 'set_lang', lang })); };
-  if (!token) { status('Missing link token — run /listen in Discord'); return; }
-  loadLangs().then(connect).catch(() => {});
+  // ---------------------------------------------------------------- go
+  if (!token) { document.body.innerHTML = '<div class="wrap"><p class="empty">Open your translator from Discord: tap <b>🎧 Open my translator</b>.</p></div>'; return; }
+  loadNames().then(() => { if (lang) { showLive(); connect(); } else showPicker(); });
 })();
 </script>
 </body>

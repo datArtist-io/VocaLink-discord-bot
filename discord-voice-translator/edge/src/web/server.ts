@@ -188,6 +188,7 @@ export class WebServer {
       ws.on('pong', () => (w.alive = true));
       const lang = normalizeLang(url.searchParams.get('lang')) ?? p.l ?? 'en';
       const listener = this.d.hub.attach(p.g, p.u, lang === 'auto' ? 'en' : lang, ws);
+      if (url.searchParams.get('lang') && lang !== 'auto') this.d.store.updateUser(p.u, { hearLang: lang }); // remember the choice
       this.d.metrics.inc('web_listener_connects');
       ws.on('message', (data, isBinary) => {
         if (isBinary) return;
@@ -195,7 +196,10 @@ export class WebServer {
           const m = JSON.parse(String(data)) as { type?: string; lang?: string };
           if (m.type === 'set_lang') {
             const l = normalizeLang(m.lang);
-            if (l && l !== 'auto') this.d.hub.setLang(listener, l);
+            if (l && l !== 'auto') {
+              this.d.hub.setLang(listener, l);
+              this.d.store.updateUser(p.u, { hearLang: l }); // remembered for next time
+            }
           }
         } catch {
           /* ignore malformed */

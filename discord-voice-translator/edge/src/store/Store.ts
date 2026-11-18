@@ -27,11 +27,11 @@ export interface GuildSettings {
 }
 
 /** Settings schema version; rows written before v2 used the old defaults. */
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 export const DEFAULT_SETTINGS: GuildSettings = {
   textTargets: ['en', 'tl'],      // the server's languages (1-3): everything said is translated into these
-  dubLang: 'auto',                // dubbing on: Tagalog speech -> English voice, English speech -> Tagalog voice
+  dubLang: null,                  // channel loudspeaker off: everyone hears their own language in their personal player
   mode: 'literal',
   voiceMode: 'house',
   mirrors: false,
@@ -130,6 +130,7 @@ export class Store {
       if (stored.summaries === true) delete stored.summaries;
       if (stored.expectedLangs === null) delete stored.expectedLangs;
     }
+    if ((stored.v ?? 1) < 3 && stored.dubLang === 'auto') delete stored.dubLang; // old default, not a choice
     delete stored.v;
     return { ...DEFAULT_SETTINGS, ...stored };
   }

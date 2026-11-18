@@ -173,11 +173,13 @@ export class WebServer {
   private upgrade(req: IncomingMessage, sock: import('node:stream').Duplex, head: Buffer): void {
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname !== '/ws/listen') {
+      this.d.log.warn('websocket rejected: unknown path', { path: url.pathname });
       sock.destroy();
       return;
     }
     const p = this.d.signer.verify(url.searchParams.get('t'), 'listen');
     if (!p) {
+      this.d.log.warn('player rejected: link invalid or expired (e.g. signed before a restart without WEB_SECRET)');
       sock.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       sock.destroy();
       return;
@@ -190,10 +192,12 @@ export class WebServer {
       const listener = this.d.hub.attach(p.g, p.u, lang === 'auto' ? 'en' : lang, ws);
       if (url.searchParams.get('lang') && lang !== 'auto') this.d.store.updateUser(p.u, { hearLang: lang }); // remember the choice
       this.d.metrics.inc('web_listener_connects');
+      this.d.log.info('player connected', { guild: p.g, lang });
       ws.on('message', (data, isBinary) => {
         if (isBinary) return;
         try {
-          const m = JSON.parse(String(data)) as { type?: string; lang?: string };
+          const m = JSON.parse(String(data)) as { type?: string; lang?: string; on?: boolean };
+          if (m.type === 'hear_self') this.d.hub.setHearSelf(listener, Boolean(m.on));
           if (m.type === 'set_lang') {
             const l = normalizeLang(m.lang);
             if (l && l !== 'auto') {

@@ -146,6 +146,7 @@ async function benchGemini(phrases: string[], key: string, log: Logger): Promise
 }
 
 async function benchEleven(key: string, log: Logger): Promise<void> {
+  for (const model of (process.env.BENCH_TTS_MODELS ?? 'eleven_flash_v2_5,eleven_v4_turbo').split(',')) {
   const ttfb: number[] = [];
   let error = '';
   for (const text of ['Dude, just a moment, okay,', 'because my internet is so slow today,', "Don't worry, we'll win later.", 'Kumusta kayong lahat?', 'Tara, laro na tayo mamaya.']) {
@@ -154,7 +155,7 @@ async function benchEleven(key: string, log: Logger): Promise<void> {
       const r = await fetch('https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb/stream?output_format=pcm_48000', {
         method: 'POST', signal: AbortSignal.timeout(10_000),
         headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, model_id: process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5' }),
+        body: JSON.stringify({ text, model_id: model }),
       });
       if (!r.ok || !r.body) { error = `HTTP ${r.status} ${(await r.text()).slice(0, 160)}`; continue; }
       const it = (r.body as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
@@ -165,7 +166,8 @@ async function benchEleven(key: string, log: Logger): Promise<void> {
       error = String((e as Error).message);
     }
   }
-  log.info('bench elevenlabs', { error: error || undefined, first_audio: stats(ttfb) });
+  log.info('bench elevenlabs', { model, error: error || undefined, first_audio: stats(ttfb) });
+  }
 }
 
 export async function runBench(log: Logger): Promise<void> {
@@ -175,6 +177,7 @@ export async function runBench(log: Logger): Promise<void> {
   const pcm = Buffer.from(await r.arrayBuffer());
   const env = process.env;
   if (env.ELEVENLABS_API_KEY) await benchEleven(env.ELEVENLABS_API_KEY, log).catch((e) => log.error('bench elevenlabs failed', { err: e }));
+  if (env.BENCH_ONLY === 'tts') { log.info('bench done'); return; }
   if (env.SONIOX_API_KEY) await benchSoniox(pcm, env.SONIOX_API_KEY, log).catch((e) => log.error('bench soniox failed', { err: e }));
   let phrases: string[] = [];
   if (env.DEEPGRAM_API_KEY) {

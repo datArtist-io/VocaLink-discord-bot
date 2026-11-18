@@ -36,6 +36,7 @@ import {
 import { createDecoder } from '../audio/opus.js';
 import type { EdgeConfig } from '../config.js';
 import { describe, flag, langLabel, PANEL_LANGS, renderPanel } from './setupPanel.js';
+import { HOUSE_VOICES, type VoiceBank } from '../worker/VoiceBank.js';
 import { autocompleteLanguages, languageName, normalizeLang, parseLangList } from '../languages.js';
 import type { Metrics } from '../metrics/Metrics.js';
 import type { GuildSettings, Store } from '../store/Store.js';
@@ -67,6 +68,7 @@ export interface BotDeps {
   hub: WebHub;
   signer: TokenSigner;
   mirrors: MirrorManager | null;
+  voiceBank?: VoiceBank | null;
   log: Logger;
 }
 
@@ -95,6 +97,7 @@ export class TranslatorBot {
       if (i.isButton() && i.customId === 'listen:open' && i.inGuild()) return await this.replyTranslator(i, null);
       if (i.isStringSelectMenu() && i.customId === 'listen:lang' && i.inGuild()) return await this.onTranslatorLang(i);
       if (i.isButton() && (i.customId === 'listen:vol:+' || i.customId === 'listen:vol:-') && i.inGuild()) return await this.onTranslatorVolume(i);
+      if (((i.isStringSelectMenu() && i.customId === 'listen:voice') || (i.isButton() && i.customId === 'listen:voice:delete')) && i.inGuild()) return await this.onTranslatorVoice(i);
       if (!i.isChatInputCommand() || !i.inGuild()) return;
       this.d.metrics.inc(`cmd_${i.commandName}`);
       switch (i.commandName) {
@@ -423,6 +426,7 @@ export class TranslatorBot {
 
   private async cmdOpt(i: ChatInputCommandInteraction, out: boolean): Promise<void> {
     this.d.store.updateUser(i.user.id, { optout: out });
+    if (out) await this.d.voiceBank?.remove(i.user.id); // their cloned voice is deleted too
     if (out) for (const a of this.sessions.values()) a.session.dropUser(i.user.id); // every server, immediately
     await i.reply({
       content: out
@@ -741,15 +745,40 @@ export class TranslatorBot {
       new ButtonBuilder().setCustomId('listen:vol:show').setLabel(`Volume ${vol}%`).setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId('listen:vol:+').setEmoji('🔊').setLabel('Louder').setStyle(ButtonStyle.Secondary).setDisabled(vol >= 200),
     ));
+    const vb = this.d.voiceBank;
+    let voiceLine = '';
+    if (vb) {
+      const pref = vb.pref(userId);
+      const st = vb.status(userId);
+      rows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('listen:voice')
+          .setPlaceholder('🗣️ How others hear you')
+          .addOptions(
+            { label: 'My own voice', description: 'Others hear YOU speaking their language (recommended)', value: 'clone', emoji: '🗣️', default: pref === 'clone' },
+            { label: 'Automatic', description: 'A natural voice matched to yours', value: 'auto', emoji: '✨', default: !pref },
+            ...HOUSE_VOICES.map((h) => ({ label: h.name, description: `${h.desc} · ${h.low ? 'lower' : 'higher'} voice`, value: h.id, emoji: h.low ? '🎙️' : '🎤', default: pref === h.id })),
+          ),
+      ));
+      voiceLine =
+        st.status === 'ready' ? '\n🗣️ Others hear you **in your own voice**.'
+        : st.status === 'learning' ? `\n🗣️ Learning your voice: **${st.learnedPct ?? 0}%**. Just keep talking; it switches automatically.`
+        : st.status === 'creating' ? '\n🗣️ Creating your voice… a few seconds.'
+        : st.status === 'unavailable' ? `\n🗣️ Your own voice isn't available yet: ${st.detail}. Using a matched voice meanwhile.`
+        : pref ? `\n🗣️ Others hear you as **${HOUSE_VOICES.find((h) => h.id === pref)?.name ?? 'your chosen voice'}**.` : '';
+      if (pref === 'clone' || vb.cloneId(userId)) {
+        rows[1]!.addComponents(new ButtonBuilder().setCustomId('listen:voice:delete').setEmoji('🗑️').setLabel('Delete my voice').setStyle(ButtonStyle.Danger));
+      }
+    }
     if (lang) {
       const t = this.d.signer.sign({ g: guildId, u: userId, s: 'listen', l: lang }, this.d.cfg.listenTtlMs);
       rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(`${this.d.cfg.publicUrl}/listen?t=${t}&lang=${lang}&vol=${vol}`).setLabel(`Open my translator · ${langLabel(lang)}`),
       ));
     }
-    const content = lang
+    const content = (lang
       ? `🎧 **Your personal translator.** You'll hear everyone in ${langLabel(lang)}, privately.\n-# Only you hear it. You never hear yourself. Use headphones.`
-      : '🎧 **Your personal translator.** Which language do you want to hear?';
+      : '🎧 **Your personal translator.** Which language do you want to hear?') + voiceLine;
     return { content, components: rows };
   }
 
@@ -767,6 +796,20 @@ export class TranslatorBot {
     const v = Math.min(200, Math.max(10, this.volumeOf(i.user.id) + step));
     this.d.store.setKv(`vol:${i.user.id}`, String(v));
     this.d.hub.setUserVolume(i.guildId!, i.user.id, v); // an open player follows instantly
+    await i.update(this.translatorPanel(i.guildId!, i.user.id));
+  }
+
+  private async onTranslatorVoice(i: StringSelectMenuInteraction | ButtonInteraction): Promise<void> {
+    const vb = this.d.voiceBank;
+    if (!vb) return;
+    if (i.isButton()) {
+      await vb.remove(i.user.id); // deletes the clone at ElevenLabs right away
+    } else {
+      const v = i.values[0] ?? 'auto';
+      // choosing "My own voice" is the person's own explicit consent to a voice clone
+      if (v === 'clone') { vb.retry(i.user.id); vb.setPref(i.user.id, 'clone'); }
+      else vb.setPref(i.user.id, v === 'auto' ? null : v);
+    }
     await i.update(this.translatorPanel(i.guildId!, i.user.id));
   }
 

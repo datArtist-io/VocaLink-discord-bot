@@ -17,6 +17,7 @@ import { TokenSigner } from './web/auth.js';
 import { WebHub } from './web/hub.js';
 import { WebServer } from './web/server.js';
 import { CloudWorker } from './worker/CloudWorker.js';
+import { VoiceBank } from './worker/VoiceBank.js';
 import { WorkerPool } from './worker/WorkerPool.js';
 
 async function main(): Promise<void> {
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   const signer = new TokenSigner(secret);
   const metrics = new Metrics();
   const hub = new WebHub();
+  const voiceBank = cfg.pipeline === 'cloud' ? new VoiceBank(store, { elevenKey: cfg.cloud.elevenApiKey, log: log.child('voices') }) : null;
   const cloud =
     cfg.pipeline === 'cloud'
       ? new CloudWorker({
@@ -46,6 +48,7 @@ async function main(): Promise<void> {
           elevenVoiceId: cfg.cloud.elevenVoiceId,
           elevenModel: cfg.cloud.elevenModel,
           elevenConcurrency: cfg.cloud.elevenConcurrency,
+          voiceBank: voiceBank ?? undefined,
           defaultLangs: cfg.cloud.defaultLangs,
           log: log.child('cloud'),
         })
@@ -56,7 +59,7 @@ async function main(): Promise<void> {
 
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
   const mirrors = cfg.mirrorTokens.length && shardId === 0 ? new MirrorManager(cfg.mirrorTokens, log.child('mirror'), cfg.daveFailureTolerance) : null;
-  const bot = new TranslatorBot({ cfg, client, pool, store, metrics, hub, signer, mirrors, log: log.child('bot') });
+  const bot = new TranslatorBot({ cfg, client, pool, store, metrics, hub, signer, mirrors, voiceBank, log: log.child('bot') });
   bot.attach();
 
   const web = new WebServer({

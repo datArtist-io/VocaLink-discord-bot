@@ -28,6 +28,7 @@ import WebSocket from 'ws';
 
 import { Agc } from '../audio/Agc.js';
 import { PitchTracker } from '../audio/Pitch.js';
+import type { VoiceBank } from './VoiceBank.js';
 import type { Json } from '../protocol/frames.js';
 import type { HelloAck, LanguageInfo } from '../protocol/messages.js';
 import { languageName } from '../languages.js';
@@ -72,6 +73,8 @@ export interface CloudWorkerOptions {
   defaultLangs?: string[];
   /** How many voices ElevenLabs lets this account generate at once (plan limit). Extra requests queue. */
   elevenConcurrency?: number;
+  /** Per-person voice choice / own cloned voice. */
+  voiceBank?: VoiceBank;
   /** Optional HTTP agent for the Soniox WebSocket (e.g. behind an HTTPS proxy). */
   wsAgent?: import('node:http').Agent;
   log?: Logger;
@@ -155,7 +158,7 @@ export class CloudWorker extends EventEmitter {
   private replayers = new Set<() => Json[]>();
   private sweeper: NodeJS.Timeout | null = null;
   private readonly log: Logger;
-  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent' | 'elevenVoiceId'>> & { wsAgent?: import('node:http').Agent; elevenVoiceId?: string };
+  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent' | 'elevenVoiceId' | 'voiceBank'>> & { wsAgent?: import('node:http').Agent; elevenVoiceId?: string; voiceBank?: VoiceBank };
   /** guildId -> userId -> voice id (stable for the whole call) */
   private voiceOf = new Map<string, Map<string, string>>();
   private lastWarm = 0;
@@ -177,6 +180,7 @@ export class CloudWorker extends EventEmitter {
       defaultLangs: opts.defaultLangs ?? ['tl', 'en'],
       wsAgent: opts.wsAgent,
       elevenConcurrency: Math.max(1, opts.elevenConcurrency ?? 3),
+      voiceBank: opts.voiceBank,
     };
     this.log = opts.log ?? createLogger('cloud');
   }
@@ -255,6 +259,7 @@ export class CloudWorker extends EventEmitter {
     if (!s) return;
     const pcm = s.agc.process(raw); // lift faint speakers before recognition
     s.pitch.push(pcm);
+    this.o.voiceBank?.feed(s.userId, pcm); // learns their own voice, only if they chose "My own voice"
     s.lastAudioAt = performance.now();
     this.syncLanes(s);
     for (const lane of s.lanes.values()) {
@@ -644,6 +649,8 @@ export class CloudWorker extends EventEmitter {
    */
   voiceFor(s: Stream): string {
     if (this.o.elevenVoiceId) return this.o.elevenVoiceId;
+    const chosen = this.o.voiceBank?.voiceFor(s.userId); // their own voice, or the one they picked
+    if (chosen) return chosen;
     let g = this.voiceOf.get(s.guildId);
     if (!g) this.voiceOf.set(s.guildId, (g = new Map()));
     const have = g.get(s.userId);

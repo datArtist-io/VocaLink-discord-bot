@@ -83,6 +83,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
 <script>
 (() => {
   const q = new URLSearchParams(location.search);
+  const BUILD = '__BUILD_ID__';
   const token = q.get('t');
   const $ = (id) => document.getElementById(id);
   const FLAGS = { en:'🇺🇸', tl:'🇵🇭', es:'🇪🇸', fr:'🇫🇷', pt:'🇧🇷', de:'🇩🇪', it:'🇮🇹', ja:'🇯🇵', ko:'🇰🇷', zh:'🇨🇳', hi:'🇮🇳', id:'🇮🇩', ms:'🇲🇾', vi:'🇻🇳', ar:'🇸🇦', ru:'🇷🇺', tr:'🇹🇷', pl:'🇵🇱', nl:'🇳🇱', sv:'🇸🇪', uk:'🇺🇦', ro:'🇷🇴', el:'🇬🇷', cs:'🇨🇿', ta:'🇮🇳', da:'🇩🇰', fi:'🇫🇮', no:'🇳🇴', hu:'🇭🇺', bg:'🇧🇬', hr:'🇭🇷', sk:'🇸🇰' };
@@ -197,7 +198,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     if (playhead < now + 0.02) playhead = now + 0.05;      // underrun: tiny re-buffer instead of a hard cut
     if (d.first) { for (let i = 0, n = Math.min(f.length, FADE_S * SR); i < n; i++) f[i] *= i / n; d.first = false; }
     if (last) { const n = Math.min(f.length, FADE_S * SR); for (let i = 0; i < n; i++) f[f.length - 1 - i] *= i / n; }
-    const b = ctx.createBuffer(1, f.length, SR); b.copyToChannel(f, 0);
+    const b = ctx.createBuffer(1, f.length, d.rate || SR); b.copyToChannel(f, 0);
     const s = ctx.createBufferSource(); s.buffer = b; s.connect(duck);
     s.start(playhead); playhead += b.duration;
   }
@@ -219,7 +220,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     const pcm = new Int16Array(buf, 8); const f = new Float32Array(pcm.length);
     for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
     if (d.started) { schedule(d, f, false); return; }
-    d.pending.push(f); d.buffered += f.length / SR;
+    d.pending.push(f); d.buffered += f.length / (d.rate || SR);
     if (d.buffered >= PREBUFFER_S) begin(d);
   }
   function endDub(id) {
@@ -241,7 +242,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   // ---------------------------------------------------------------- connection
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/listen?t=${encodeURIComponent(token)}&lang=${encodeURIComponent(lang)}&v=3`);
     ws.binaryType = 'arraybuffer';
     let opened = false;
     ws.onopen = () => { opened = true; fails = 0; state('Connecting…'); if ($('self').checked) ws.send(JSON.stringify({ type: 'hear_self', on: true })); };
@@ -258,12 +259,13 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     ws.onmessage = (ev) => typeof ev.data === 'string' ? onJson(JSON.parse(ev.data)) : onAudio(ev.data);
   }
   function onJson(m) {
+    if (m.type === 'build') { if (m.id !== BUILD) location.reload(); return; }   // VocaLink was updated: load the new player
     if (m.type === 'status') {
       state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
       if (m.lang && m.lang !== lang) { lang = m.lang; try { localStorage.setItem('vl_lang', lang); } catch {} $('mylang').textContent = `${flag(lang)} ${langName(lang)}`; }
     }
     else if (m.type === 'caption') caption(m);
-    else if (m.type === 'dub_start') dubFor(m.dub_id).user = m.user_id;
+    else if (m.type === 'dub_start') { const d = dubFor(m.dub_id); d.user = m.user_id; d.rate = m.sample_rate || 48000; }
     else if (m.type === 'dub_end') endDub(m.dub_id);
     else if (m.type === 'speaking') speaking(m);
     else if (m.type === 'volume') { $('vol').value = m.value; if (master) master.gain.setTargetAtTime(m.value / 100, ctx.currentTime, 0.05); }

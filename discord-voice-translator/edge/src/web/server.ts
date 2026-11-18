@@ -39,6 +39,8 @@ export interface WebDeps {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
+/** identifies this deployment; pages embed it and reload when the live build changes */
+export const BUILD_ID = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_DEPLOYMENT_ID || String(Date.now())).slice(0, 12);
 
 function page(dir: string, name: string): string {
   return readFileSync(join(dir, name), 'utf8');
@@ -106,7 +108,7 @@ export class WebServer {
       this.pages.set(name, tpl);
     }
     const nonce = randomBytes(16).toString('base64');
-    const body = tpl.replace(/<script>/g, `<script nonce="${nonce}">`).replace(/<style>/g, `<style nonce="${nonce}">`);
+    const body = tpl.replaceAll('__BUILD_ID__', BUILD_ID).replace(/<script>/g, `<script nonce="${nonce}">`).replace(/<style>/g, `<style nonce="${nonce}">`);
     send(res, 200, body, 'text/html; charset=utf-8', {
       'Content-Security-Policy': `default-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'`,
     });
@@ -190,6 +192,10 @@ export class WebServer {
       ws.on('pong', () => (w.alive = true));
       const lang = normalizeLang(url.searchParams.get('lang')) ?? p.l ?? 'en';
       const listener = this.d.hub.attach(p.g, p.u, lang === 'auto' ? 'en' : lang, ws);
+      const v = Number(url.searchParams.get('v') ?? 0);
+      listener.rate = v >= 3 ? 48000 : 24000;
+      // tell the player which build is live; a player from an older build reloads itself
+      ws.send(JSON.stringify({ type: 'build', id: BUILD_ID }));
       if (url.searchParams.get('lang') && lang !== 'auto') this.d.store.updateUser(p.u, { hearLang: lang }); // remember the choice
       this.d.metrics.inc('web_listener_connects');
       this.d.log.info('player connected', { guild: p.g, lang });

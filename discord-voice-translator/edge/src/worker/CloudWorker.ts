@@ -70,6 +70,8 @@ export interface CloudWorkerOptions {
   elevenModel?: string;
   elevenBaseUrl?: string;
   defaultLangs?: string[];
+  /** How many voices ElevenLabs lets this account generate at once (plan limit). Extra requests queue. */
+  elevenConcurrency?: number;
   /** Optional HTTP agent for the Soniox WebSocket (e.g. behind an HTTPS proxy). */
   wsAgent?: import('node:http').Agent;
   log?: Logger;
@@ -157,6 +159,9 @@ export class CloudWorker extends EventEmitter {
   /** guildId -> userId -> voice id (stable for the whole call) */
   private voiceOf = new Map<string, Map<string, string>>();
   private lastWarm = 0;
+  /** Concurrency gate for ElevenLabs (requests beyond the plan limit would fail with 429). */
+  private ttsActive = 0;
+  private ttsWaiting: (() => void)[] = [];
 
   constructor(opts: CloudWorkerOptions) {
     super();
@@ -171,6 +176,7 @@ export class CloudWorker extends EventEmitter {
       elevenBaseUrl: (opts.elevenBaseUrl ?? 'https://api.elevenlabs.io').replace(/\/$/, ''),
       defaultLangs: opts.defaultLangs ?? ['tl', 'en'],
       wsAgent: opts.wsAgent,
+      elevenConcurrency: Math.max(1, opts.elevenConcurrency ?? 3),
     };
     this.log = opts.log ?? createLogger('cloud');
   }
@@ -666,6 +672,7 @@ export class CloudWorker extends EventEmitter {
     let firstAudio: number | undefined;
     let reason = 'done';
     let carry: Buffer | null = null;
+    let release: (() => void) | null = null;
     try {
       const url = `${this.o.elevenBaseUrl}/v1/text-to-speech/${encodeURIComponent(req.voiceId)}/stream?output_format=pcm_48000`;
       const body = JSON.stringify({
@@ -676,6 +683,7 @@ export class CloudWorker extends EventEmitter {
         ...(req.previous ? { previous_text: req.previous } : {}),
         voice_settings: { stability: 0.45, similarity_boost: 0.8, use_speaker_boost: true, speed: 1.05 },
       });
+      release = await this.ttsSlot(signal); // stay within the ElevenLabs plan's concurrency (else requests fail)
       const res = await this.fetchWithFirstByteTimeout(url, body, signal);
       let seq = 0;
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
@@ -704,12 +712,35 @@ export class CloudWorker extends EventEmitter {
         this.emit('event', { type: 'error', message: String((e as Error).message), stage: 'tts' });
       }
     } finally {
+      release?.();
       this.dubs.delete(dubId);
       this.emit('event', {
         type: 'tts_end', dub_id: dubId, cancelled: reason === 'cancelled', reason, truncated: null, frames,
         latency: firstAudio === undefined ? {} : { tts_first_audio: Math.round(firstAudio) },
       });
     }
+  }
+
+  private async ttsSlot(signal: AbortSignal): Promise<() => void> {
+    if (this.ttsActive >= this.o.elevenConcurrency) {
+      await new Promise<void>((res, rej) => {
+        const go = () => res();
+        this.ttsWaiting.push(go);
+        signal.addEventListener('abort', () => {
+          const i = this.ttsWaiting.indexOf(go);
+          if (i >= 0) this.ttsWaiting.splice(i, 1);
+          rej(new Error('cancelled while queued'));
+        }, { once: true });
+      });
+    }
+    this.ttsActive++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.ttsActive--;
+      this.ttsWaiting.shift()?.();
+    };
   }
 
   /** POST to ElevenLabs; if no response headers arrive within TTS_FIRST_BYTE_MS, retry once. */
@@ -729,7 +760,8 @@ export class CloudWorker extends EventEmitter {
         clearTimeout(timer);
         if (!res.ok || !res.body) {
           const msg = `ElevenLabs HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`;
-          if (attempt === 0 && (res.status === 429 || res.status >= 500)) continue;
+          if (attempt < 3 && res.status === 429) { await new Promise((r) => setTimeout(r, 120 * (attempt + 1))); continue; } // plan busy: brief wait
+          if (attempt === 0 && res.status >= 500) continue;
           throw new Error(msg);
         }
         return res;

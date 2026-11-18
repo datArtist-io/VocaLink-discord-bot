@@ -117,3 +117,17 @@ test('captions never fuse words where original and translated text meet', async 
   assert.equal('okay' + joinPiece('okay', ', fine', true), 'okay, fine');
   assert.equal('pa' + joinPiece('pa', 'nalo', false), 'panalo'); // same kind of text: untouched
 });
+
+test('ElevenLabs requests never exceed the plan concurrency; extra ones queue, none are lost', async () => {
+  const w = new CloudWorker({ sonioxKey: async () => 'x', elevenKey: 'x', elevenConcurrency: 2 });
+  let active = 0, peak = 0, done = 0;
+  const jobs = Array.from({ length: 7 }, async () => {
+    const release = await (w as any).ttsSlot(new AbortController().signal);
+    active++; peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, 10));
+    active--; done++; release();
+  });
+  await Promise.all(jobs);
+  assert.equal(peak, 2);
+  assert.equal(done, 7);
+});

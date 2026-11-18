@@ -16,6 +16,7 @@ export interface EdgeConfig {
     elevenApiKey: string;
     elevenVoiceId?: string;
     elevenModel?: string;
+    elevenConcurrency?: number;
     defaultLangs: string[];
   };
   workers: { host: string; port: number }[];
@@ -64,6 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { require
       elevenApiKey: env.ELEVENLABS_API_KEY ?? '',
       elevenVoiceId: env.ELEVENLABS_VOICE_ID || undefined,
       elevenModel: env.ELEVENLABS_MODEL || undefined,
+      elevenConcurrency: env.ELEVENLABS_CONCURRENCY ? Number(env.ELEVENLABS_CONCURRENCY) : undefined,
       defaultLangs: (env.DEFAULT_SPOKEN_LANGS ?? 'tl,en').split(',').map((x) => x.trim()).filter(Boolean),
     },
     workers: parseWorkerUrls(env.WORKER_URLS ?? 'worker:7700'),

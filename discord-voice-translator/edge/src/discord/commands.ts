@@ -48,7 +48,7 @@ export const COMMANDS = [
         type: SUB, name: 'set', description: 'Change settings',
         options: [
           { type: STRING, name: 'captions', description: 'Caption languages, comma-separated (e.g. "en, fr, yo")' },
-          { type: STRING, name: 'dub', description: 'Voice dubbing language for the channel, or "off"', autocomplete: true },
+          { type: STRING, name: 'dub', description: 'Voice dubbing: "auto" (each side hears the other language), a language, or "off"', autocomplete: true },
           { type: STRING, name: 'mode', description: 'Translation style', choices: [
             { name: 'literal (fast, local NMT)', value: 'literal' }, { name: 'natural (needs an LLM)', value: 'natural' },
             { name: 'cultural (adapt idioms, needs an LLM)', value: 'cultural' }] },

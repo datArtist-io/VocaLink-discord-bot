@@ -50,7 +50,7 @@ class Sock implements SocketLike {
 
 function makeSession(client: WorkerClient, opts: { dubLang?: string | null; textTargets?: string[] } = {}) {
   const store = new Store(':memory:');
-  store.updateSettings('g1', { textTargets: opts.textTargets ?? ['en', 'fr'], dubLang: opts.dubLang === undefined ? 'fr' : opts.dubLang });
+  store.updateSettings('g1', { summaries: true, textTargets: opts.textTargets ?? ['en', 'fr'], dubLang: opts.dubLang === undefined ? 'fr' : opts.dubLang });
   const voice = new FakeVoiceLink();
   const target = new Target();
   const hub = new WebHub();

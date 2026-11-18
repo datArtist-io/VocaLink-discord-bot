@@ -240,9 +240,16 @@ export class GuildSession extends EventEmitter {
     return s;
   }
 
+  /** Languages dubbed into the voice channel itself. */
+  private mainDubLangs(): string[] {
+    const d = this.settings.dubLang;
+    if (!d) return [];
+    if (d === 'auto') return this.settings.textTargets.slice(0, 2);
+    return [d];
+  }
+
   private audioTargets(): string[] {
-    const set = new Set<string>();
-    if (this.settings.dubLang) set.add(this.settings.dubLang);
+    const set = new Set<string>(this.mainDubLangs());
     for (const l of this.mirrors.keys()) set.add(l);
     for (const l of this.webLangs) set.add(l);
     return [...set];
@@ -580,7 +587,7 @@ export class GuildSession extends EventEmitter {
     const meta: DubMeta = { dubId: e.dub_id, userId: e.user_id, lang: e.lang, text: e.text, incremental: e.incremental };
     const route: DubRoute = { lang: e.lang, userId: e.user_id, consumers: 0, ended: false, startAt: performance.now(), uttKey: this.uttKey(e.sid, e.utt_id) };
     this.dubs.set(e.dub_id, route);
-    if (this.settings.dubLang === e.lang) {
+    if (this.mainDubLangs().includes(e.lang)) {
       route.consumers++;
       this.main.enqueue(meta);
     }
@@ -603,7 +610,7 @@ export class GuildSession extends EventEmitter {
   private onDubAudio(dubId: number, seq: number, pcm: Buffer): void {
     const r = this.dubs.get(dubId);
     if (!r) return;
-    if (this.settings.dubLang === r.lang) this.main.push(dubId, pcm);
+    if (this.mainDubLangs().includes(r.lang)) this.main.push(dubId, pcm);
     this.mirrors.get(r.lang)?.sched.push(dubId, pcm);
     if (this.webLangs.includes(r.lang)) this.d.hub?.dubAudio(this.guildId, r.lang, dubId, seq, pcm);
   }
@@ -634,7 +641,7 @@ export class GuildSession extends EventEmitter {
     const r = this.dubs.get(it.dubId);
     if (!r) return;
     const u = this.utts.get(r.uttKey);
-    if (u && !u.firstAudioLogged && lang === this.settings.dubLang) {
+    if (u && !u.firstAudioLogged && this.mainDubLangs().includes(lang)) {
       u.firstAudioLogged = true;
       const ms = performance.now() - u.endedAt;
       if (ms > 0 && ms < 30_000) {

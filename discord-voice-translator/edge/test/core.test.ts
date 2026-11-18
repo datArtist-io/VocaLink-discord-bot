@@ -171,7 +171,7 @@ test('captions: debounced edits, finals win, rate-limited digest', async () => {
 
 test('store: settings, prefs, glossary, captions index, analytics, consent', () => {
   const st = new Store(':memory:');
-  assert.deepEqual(st.getSettings('g').textTargets, ['en']);
+  assert.deepEqual(st.getSettings('g').textTargets, ['en', 'tl']); // new default: English + Tagalog captions
   st.updateSettings('g', { textTargets: ['en', 'yo'], dubLang: 'en' });
   assert.equal(st.getSettings('g').dubLang, 'en');
   st.updateUser('u', { speakLang: 'yo', optout: true });

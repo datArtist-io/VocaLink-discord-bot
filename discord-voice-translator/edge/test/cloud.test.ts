@@ -72,3 +72,9 @@ test('AGC lifts faint speech, caps gain and leaves silence silent', () => {
   const silent = agc.process(Buffer.alloc(640));
   assert.equal(peak(silent), 0);
 });
+
+test('auto dubbing (both languages on): a mostly-Tagalog Taglish sentence gets ONE dub, in English', () => {
+  const { spoken } = setup(['en', 'tl']);
+  assert.ok(spoken.length > 0);
+  assert.ok(spoken.every((x) => x.lang === 'en'), `got ${JSON.stringify(spoken)}`);
+});

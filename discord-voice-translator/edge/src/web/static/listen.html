@@ -3,19 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0e1013">
+<meta name="theme-color" content="#040d12">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23071a20'/%3E%3Cpath d='M12 33h8l4.5-12 7 24 6.5-18 4 10 3.5-4H52' fill='none' stroke='%23ff8a3d' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300&family=Manrope:wght@400;600;700&family=Schibsted+Grotesk:wght@600&display=swap" rel="stylesheet">
 <title>VocaLink · My translator</title>
 <style>
-:root{--bg:#f4f5f7;--panel:#ffffff;--ink:#121418;--muted:#6a717c;--line:#e4e6ea;--accent:#5865f2;--accent-ink:#fff;--live:#23a55a;--soft:#eef0fe;--you:#f2f3f5}
-@media (prefers-color-scheme:dark){:root{--bg:#0e1013;--panel:#17191e;--ink:#eef0f3;--muted:#9097a1;--line:#262a31;--accent:#7984ff;--accent-ink:#0e1013;--live:#3ccf7a;--soft:#1e2233;--you:#1b1d22}}
+:root{color-scheme:dark;--bg:#040d12;--panel:rgba(14,40,46,.55);--ink:#e6efe9;--muted:#9db4ae;--line:rgba(170,230,215,.14);--accent:#ff8a3d;--accent-ink:#1a0d04;--live:#7ff0dc;--soft:rgba(255,138,61,.12);--you:rgba(4,16,22,.6)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{margin:0;background:radial-gradient(120% 70% at 50% -10%,#0d3a40 0%,#071a20 42%,#040d12 100%) fixed;color:var(--ink);font:16px/1.5 Manrope,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.brand{display:flex;align-items:center;gap:10px;margin:4px 0 18px;color:var(--ink);text-decoration:none;font:600 20px/1 "Schibsted Grotesk",Manrope,sans-serif;letter-spacing:-.03em}
+.brand svg{width:30px;height:30px}
 .wrap{max-width:640px;margin:0 auto;padding:16px 16px calc(24px + env(safe-area-inset-bottom))}
 .hide{display:none!important}
 
 /* first run: pick your language */
-#pick h1{font-size:26px;line-height:1.2;margin:28px 0 6px}
+#pick h1{font:300 32px/1.12 Fraunces,Georgia,serif;letter-spacing:-.015em;margin:20px 0 8px}
 #pick p{color:var(--muted);margin:0 0 20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
 .lang{display:flex;align-items:center;gap:10px;padding:14px;border-radius:14px;background:var(--panel);border:1px solid var(--line);font:inherit;color:inherit;cursor:pointer;text-align:left}
@@ -35,15 +40,15 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
 .person.talking .av{outline-color:var(--live)}
 .person.muted{opacity:.4}
 .feed{display:flex;flex-direction:column;gap:10px}
-.msg{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px 14px;animation:in .18s ease-out}
+.msg{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px 14px;animation:in .18s ease-out;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
 @keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .msg .who{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:2px}
 .msg .who b{color:var(--ink);font-weight:600}
-.msg .txt{font-size:18px;line-height:1.4}
+.msg .txt{font:300 21px/1.35 Fraunces,Georgia,serif}
 .msg.partial .txt{color:var(--muted)}
 .msg .orig{font-size:13px;color:var(--muted);margin-top:4px}
 .msg.you{background:var(--you)}
-.msg.you .txt{font-size:15px;color:var(--muted)}
+.msg.you .txt{font:400 15px/1.45 Manrope,sans-serif;color:var(--muted)}
 .empty{color:var(--muted);text-align:center;padding:48px 12px}
 .empty .big{font-size:40px}
 .bar{position:sticky;bottom:0;margin-top:14px;padding:12px 14px;border-radius:16px;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;gap:12px}
@@ -56,6 +61,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
 </head>
 <body>
 <div class="wrap">
+  <a class="brand" href="https://vocalinktest.vercel.app" target="_blank" rel="noopener"><svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="16" fill="#071a20"/><rect x=".75" y=".75" width="62.5" height="62.5" rx="15.25" fill="none" stroke="#7ff0dc" stroke-opacity=".18" stroke-width="1.5"/><path d="M13 33h7l4.5-12 7 24 6.5-18 4 10 3.5-4H51" fill="none" stroke="#ff8a3d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>VocaLink</a>
 
   <section id="pick" class="hide">
     <h1>Which language do you want to hear?</h1>
@@ -70,7 +76,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     </header>
     <div class="people" id="people"></div>
     <div class="feed" id="feed">
-      <div class="empty" id="empty"><div class="big">🎧</div>You’re all set. When someone speaks, you’ll hear them in your language.</div>
+      <div class="empty" id="empty">You’re all set. When someone speaks, you’ll hear them in your language.</div>
     </div>
     <div class="bar">🔈<input id="vol" type="range" min="0" max="200" value="100" aria-label="Volume">🔊</div>
     <label class="self"><input type="checkbox" id="self"> Hear myself too <span>(for testing on your own)</span></label>
@@ -78,7 +84,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   </section>
 
 </div>
-<div class="start hide" id="startOv"><button id="startBtn">▶ Start listening</button></div>
+<div class="start hide" id="startOv"><button id="startBtn">Start listening</button></div>
 
 <script>
 (() => {

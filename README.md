@@ -1,4 +1,9 @@
-# VocaLink
+<p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.png">
+    <img alt="VocaLink" src="docs/brand/logo-light.png" height="64">
+  </picture>
+</p>
 
 Live voice translation for Discord. People in a voice channel speak whatever language they like, and everyone hears the others in their own language, about a second behind the speaker.
 

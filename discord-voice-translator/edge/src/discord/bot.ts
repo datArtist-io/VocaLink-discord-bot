@@ -39,6 +39,7 @@ import { describe, flag, langLabel, PANEL_LANGS, renderPanel } from './setupPane
 import { HOUSE_VOICES, type VoiceBank } from '../worker/VoiceBank.js';
 import { autocompleteLanguages, languageName, normalizeLang, parseLangList } from '../languages.js';
 import type { Metrics } from '../metrics/Metrics.js';
+import { formatHours, type Billing, type EntitlementLike } from '../billing/Billing.js';
 import type { GuildSettings, Store } from '../store/Store.js';
 import type { Logger } from '../util/log.js';
 import { DiscordVoiceLink } from '../voice/DiscordVoiceLink.js';
@@ -57,6 +58,8 @@ interface Active {
   captionsChannel: GuildTextBasedChannel;
   noticeChannel: GuildTextBasedChannel;
   leaveTimer: NodeJS.Timeout | null;
+  limitTimer?: NodeJS.Timeout | null;
+  warned?: boolean;
 }
 
 export interface BotDeps {
@@ -69,6 +72,7 @@ export interface BotDeps {
   signer: TokenSigner;
   mirrors: MirrorManager | null;
   voiceBank?: VoiceBank | null;
+  billing?: Billing | null;
   log: Logger;
 }
 
@@ -85,11 +89,18 @@ export class TranslatorBot {
     c.on(Events.InteractionCreate, (i) => void this.onInteraction(i));
     c.on(Events.VoiceStateUpdate, (o, n) => this.onVoiceState(o, n));
     c.on(Events.GuildDelete, (g) => void this.stop(g.id, 'removed from server'));
+    c.on(Events.GuildCreate, (g) => void this.welcome(g).catch((e) => this.d.log.warn('welcome failed', { err: e })));
+    // purchases in Discord's shop unlock a plan the moment they happen
+    c.on(Events.EntitlementCreate, (e) => this.d.billing?.upsert(ent(e)));
+    c.on(Events.EntitlementUpdate, (_o, n) => this.d.billing?.upsert(ent(n)));
+    c.on(Events.EntitlementDelete, (e) => this.d.billing?.remove(ent(e)));
   }
 
   // ------------------------------------------------------------------ routing
   private async onInteraction(i: Interaction): Promise<void> {
     try {
+      if (this.d.billing && 'entitlements' in i && i.entitlements) for (const e of i.entitlements.values()) this.d.billing.upsert(ent(e));
+      if (i.isButton() && i.customId === 'plan:show' && i.inGuild()) { await i.reply({ ...this.planPanel(i.guildId), flags: EPH }); return; }
       if (i.isAutocomplete()) return await this.autocomplete(i);
       if (i.isMessageContextMenuCommand()) return await this.correctMenu(i);
       if (i.isModalSubmit() && i.customId.startsWith('correct:')) return await this.correctSubmit(i);
@@ -133,6 +144,9 @@ export class TranslatorBot {
           return await this.cmdLanguages(i);
         case 'dashboard':
           return await this.cmdDashboard(i);
+        case 'plan':
+          await i.reply({ ...this.planPanel(i.guildId), flags: EPH });
+          return;
       }
     } catch (e) {
       this.d.log.error('interaction failed', { err: e });
@@ -175,6 +189,11 @@ export class TranslatorBot {
     const perms = vc.permissionsFor(me);
     if (!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak])) {
       await i.reply({ content: `I need **View Channel, Connect and Speak** in ${vc}.`, flags: EPH });
+      return;
+    }
+    const b = this.d.billing;
+    if (b?.enabled && b.remainingSeconds(guild.id) <= 0) {
+      await i.reply({ ...this.planPanel(guild.id, `This server has used its ${b.planOf(guild.id).hours} hours for this month.`), flags: EPH });
       return;
     }
     const worker = this.d.pool.anyReady();
@@ -274,6 +293,7 @@ export class TranslatorBot {
     session.start();
     const active: Active = { session, link, captionsChannel, noticeChannel: textChannel, leaveTimer: null };
     this.sessions.set(guild.id, active);
+    this.watchLimit(guild.id, active);
 
     let mirrorNote = '';
     if (settings.mirrors && this.d.mirrors && settings.mirrorLangs.length) {
@@ -286,11 +306,12 @@ export class TranslatorBot {
     }
 
     const privacy = this.d.cfg.privacyUrl ? ` · [Privacy](<${this.d.cfg.privacyUrl}>)` : '';
+    const terms = this.d.cfg.termsUrl ? ` · [Terms](<${this.d.cfg.termsUrl}>)` : '';
     if (this.d.cfg.pipeline === 'cloud') {
       await i.editReply({
         embeds: [{
           title: `🔴 Live translation is on in ${vc.name}`,
-          description: describe(settings) + `\n\n-# Voices are processed live and never recorded. \`/optout\` anytime${privacy}`,
+          description: describe(settings) + `\n\n-# Voices are processed live and never recorded. \`/optout\` anytime${privacy}${terms}`,
           color: 0xed4245,
         }],
         components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -354,6 +375,7 @@ export class TranslatorBot {
     if (!a) return;
     this.sessions.delete(guildId);
     if (a.leaveTimer) clearTimeout(a.leaveTimer);
+    if (a.limitTimer) clearInterval(a.limitTimer);
     try {
       const summary = await a.session.stop({ summary: true });
       if (summary && (summary as { ok?: boolean }).ok) await this.postSummary(a.captionsChannel, summary);
@@ -756,6 +778,85 @@ export class TranslatorBot {
   }
 
   /** The personal translator, in Discord: a language dropdown (with flags) + an Open button. Only you see it. */
+  // ------------------------------------------------------------------ plans
+  /** Just added to a server: say how to start, and offer the plans right there. */
+  private async welcome(guild: Guild): Promise<void> {
+    const me = guild.members.me;
+    const can = (ch: GuildTextBasedChannel | null | undefined): ch is GuildTextBasedChannel =>
+      !!ch && !!me && !!ch.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]);
+    let ch: GuildTextBasedChannel | null = can(guild.systemChannel) ? guild.systemChannel : null;
+    if (!ch) {
+      for (const c of guild.channels.cache.values()) if (c.type === ChannelType.GuildText && can(c as GuildTextBasedChannel)) { ch = c as GuildTextBasedChannel; break; }
+    }
+    if (!ch) return;
+    const b = this.d.billing;
+    const steps = [
+      '1. An admin runs `/setup` and picks up to three languages.',
+      '2. Join a voice channel and run `/translate start`.',
+      '3. Everyone taps **Open my translator** to hear the others in their own language.',
+    ];
+    const plan = b?.enabled
+      ? `\nThis server is on **${b.planOf(guild.id).name}**: ${b.planOf(guild.id).hours} hours a month. Upgrade any time with the buttons below or \`/plan\`.`
+      : '';
+    await ch.send({
+      embeds: [{ title: 'VocaLink is here', description: steps.join('\n') + plan + '\n\n-# Voices are processed live and never recorded. Anyone can use `/optout`.', color: 0xff8a3d }],
+      components: this.upgradeRows(guild.id),
+      allowedMentions: { parse: [] },
+    });
+  }
+
+  /** Stop the call when the month's hours run out; warn once with 10 minutes left. */
+  private watchLimit(guildId: string, a: Active): void {
+    const b = this.d.billing;
+    if (!b?.enabled) return;
+    a.limitTimer = setInterval(() => {
+      if (this.sessions.get(guildId) !== a) { if (a.limitTimer) clearInterval(a.limitTimer); return; }
+      const left = b.remainingSeconds(guildId);
+      if (left <= 0) {
+        void a.noticeChannel.send({ ...this.planPanel(guildId, `This server has used its ${b.planOf(guildId).hours} hours for this month, so translation stopped.`), allowedMentions: { parse: [] } }).catch(() => {});
+        void this.stop(guildId, 'monthly hours used');
+      } else if (left <= 600 && !a.warned) {
+        a.warned = true;
+        void a.noticeChannel.send({ content: `About ${formatHours(left)} of translation left this month.`, components: this.upgradeRows(guildId), allowedMentions: { parse: [] } }).catch(() => {});
+      }
+    }, 20_000);
+    a.limitTimer.unref?.();
+  }
+
+  /** Discord shop buttons for the plans this server doesn't have yet. */
+  private upgradeRows(guildId: string): ActionRowBuilder<ButtonBuilder>[] {
+    const b = this.d.billing;
+    if (!b?.enabled) return [];
+    const plan = b.planOf(guildId).id;
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    const plus = b.sku('plus'), pro = b.sku('pro');
+    if (plan === 'free' && plus) row.addComponents(new ButtonBuilder().setStyle(ButtonStyle.Premium).setSKUId(plus));
+    if (plan !== 'pro' && pro) row.addComponents(new ButtonBuilder().setStyle(ButtonStyle.Premium).setSKUId(pro));
+    return row.components.length ? [row] : [];
+  }
+
+  private planPanel(guildId: string, lead?: string) {
+    const b = this.d.billing;
+    if (!b?.enabled) return { content: 'VocaLink has no limits on this server right now.', embeds: [], components: [] };
+    const p = b.planOf(guildId);
+    const used = b.usedSeconds(guildId);
+    const left = b.remainingSeconds(guildId);
+    const reset = Math.floor(b.resetsAt().getTime() / 1000);
+    const lines = [
+      `**${p.name}** · ${p.hours} hours a month`,
+      `Used this month: ${formatHours(used)} · Left: ${formatHours(left)} · Resets <t:${reset}:R>`,
+      p.aiVoice ? 'Translations are spoken in natural AI voices.' : 'Translations are read aloud by each listener\'s device.',
+    ];
+    if (p.id !== 'pro') lines.push('', p.id === 'free'
+      ? `**Plus** gives ${b.plans.plus.hours} hours a month. **Pro** gives ${b.plans.pro.hours} hours, natural AI voices and your own voice.`
+      : `**Pro** gives ${b.plans.pro.hours} hours, natural AI voices and your own voice.`);
+    return {
+      content: lead ?? '',
+      embeds: [{ title: 'VocaLink plan for this server', description: lines.join('\n'), color: 0xff8a3d }],
+      components: this.upgradeRows(guildId),
+    };
+  }
+
   private translatorPanel(guildId: string, userId: string) {
     const hear = this.d.store.getUser(userId).hearLang;
     const lang = hear && hear !== 'auto' ? hear : null; // any language works; the menu shows the 25 most common
@@ -836,6 +937,10 @@ export class TranslatorBot {
     } else {
       const v = i.values[0] ?? 'auto';
       // choosing "My own voice" is the person's own explicit consent to a voice clone
+      if (v === 'clone' && this.d.billing && !this.d.billing.planOf(i.guildId!).ownVoice) {
+        await i.reply({ ...this.planPanel(i.guildId!, 'Your own voice is part of VocaLink Pro.'), flags: EPH });
+        return;
+      }
       if (v === 'clone') { vb.retry(i.user.id); vb.setPref(i.user.id, 'clone'); }
       else vb.setPref(i.user.id, v === 'auto' ? null : v);
     }
@@ -915,4 +1020,9 @@ export class TranslatorBot {
   async shutdown(): Promise<void> {
     for (const gid of [...this.sessions.keys()]) await this.stop(gid, 'bot restarting');
   }
+}
+
+/** discord.js Entitlement -> the fields billing needs */
+function ent(e: { id: string; skuId: string; guildId: string | null; deleted?: boolean; endsAt?: Date | null; consumed?: boolean }): EntitlementLike {
+  return { id: e.id, skuId: e.skuId, guildId: e.guildId, deleted: e.deleted, endsAt: e.endsAt ?? null, consumed: e.consumed };
 }

@@ -2,6 +2,7 @@
  * Edge entry point. Runs standalone or as a shard child (shard-manager.ts).
  */
 
+import { Billing } from './billing/Billing.js';
 import { Client, Events, GatewayIntentBits, REST, Routes } from 'discord.js';
 import { generateDependencyReport } from '@discordjs/voice';
 
@@ -37,6 +38,8 @@ async function main(): Promise<void> {
   const signer = new TokenSigner(secret);
   const metrics = new Metrics();
   const hub = new WebHub();
+  const billing = new Billing(store, { skuPlus: cfg.billing.skuPlus, skuPro: cfg.billing.skuPro, hours: cfg.billing.hours, log: log.child('billing') });
+  hub.voiceMode = (g) => (billing.planOf(g).aiVoice ? 'ai' : 'device');
   const voiceBank = cfg.pipeline === 'cloud' ? new VoiceBank(store, { elevenKey: cfg.cloud.elevenApiKey, log: log.child('voices') }) : null;
   const cloud =
     cfg.pipeline === 'cloud'
@@ -50,6 +53,8 @@ async function main(): Promise<void> {
           elevenConcurrency: cfg.cloud.elevenConcurrency,
           voiceBank: voiceBank ?? undefined,
           defaultLangs: cfg.cloud.defaultLangs,
+          onAudio: (g, ms) => billing.addUsage(g, ms),
+          aiVoice: (g) => billing.planOf(g).aiVoice,
           log: log.child('cloud'),
         })
       : null;
@@ -59,7 +64,7 @@ async function main(): Promise<void> {
 
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
   const mirrors = cfg.mirrorTokens.length && shardId === 0 ? new MirrorManager(cfg.mirrorTokens, log.child('mirror'), cfg.daveFailureTolerance) : null;
-  const bot = new TranslatorBot({ cfg, client, pool, store, metrics, hub, signer, mirrors, voiceBank, log: log.child('bot') });
+  const bot = new TranslatorBot({ cfg, client, pool, store, metrics, hub, signer, mirrors, voiceBank, billing, log: log.child('bot') });
   bot.attach();
 
   const web = new WebServer({
@@ -82,6 +87,23 @@ async function main(): Promise<void> {
       }
     }
     if (mirrors) await mirrors.start();
+    if (billing.enabled) {
+      try {
+        const all = [];
+        let after: string | undefined;
+        for (let page = 0; page < 50; page++) {
+          const got = await c.application.entitlements.fetch({ excludeEnded: true, limit: 100, ...(after ? { after } : {}) } as never) as unknown as Map<string, { id: string; skuId: string; guildId: string | null; deleted: boolean; endsAt: Date | null; consumed: boolean }>;
+          const list = [...got.values()];
+          all.push(...list);
+          if (list.length < 100) break;
+          after = list.map((e) => e.id).sort().at(-1);
+        }
+        billing.replaceAll(all.map((e) => ({ id: e.id, skuId: e.skuId, guildId: e.guildId, deleted: e.deleted, endsAt: e.endsAt, consumed: e.consumed })));
+        log.info('plans loaded', { entitlements: all.length });
+      } catch (e) {
+        log.error('could not load Discord shop purchases', { err: e });
+      }
+    }
   });
 
   const pruneTimer = setInterval(() => store.prune(), 3600_000);
@@ -91,6 +113,7 @@ async function main(): Promise<void> {
     log.info('shutting down', { sig });
     const hard = setTimeout(() => process.exit(1), 20_000);
     hard.unref();
+    billing.flush();
     await bot.shutdown().catch(() => {});
     await web.close().catch(() => {});
     await mirrors?.stop().catch(() => {});

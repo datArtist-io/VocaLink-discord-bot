@@ -172,3 +172,30 @@ test('languages are matched to the right sentence by time, even when streams spl
   assert.equal(fin.translations.en.text, 'My name is Josiah.');
   assert.equal(fin.translations.fr.text, "Je m'appelle Josiah."); // not "Mm-hmm." (the old sentence-counting bug)
 });
+
+test('plans: no AI voice is generated for servers without it, and spoken audio is counted', () => {
+  const used: Record<string, number> = {};
+  const w = new CloudWorker({
+    sonioxKey: async () => 'x', elevenKey: 'x',
+    aiVoice: (g) => g === 'paid',
+    onAudio: (g, ms) => { used[g] = (used[g] ?? 0) + ms; },
+  });
+  let synth = 0;
+  (w as any).synthesize = async () => { synth++; };
+  (w as any).openLane = () => {}; // no network in this test
+  w.start();
+  for (const g of ['free', 'paid']) {
+    w.sendJson({ type: 'guild_config', guild_id: g, text_targets: ['en', 'tl'], audio_targets: ['en'], channel_dub_langs: ['en'], expected_langs: null });
+  }
+  w.sendJson({ type: 'stream_open', sid: 1, guild_id: 'free', user_id: 'a', name: 'A', speak_lang: 'auto' });
+  w.sendJson({ type: 'stream_open', sid: 2, guild_id: 'paid', user_id: 'b', name: 'B', speak_lang: 'auto' });
+  const frame = Buffer.alloc(640); // 20 ms of 16 kHz audio
+  for (let k = 0; k < 50; k++) { w.sendAudio(1, k, frame); w.sendAudio(2, k, frame); }
+  assert.equal(Math.round(used.free), 1000);
+  assert.equal(Math.round(used.paid), 1000);
+  (w as any).speak((w as any).streams.get(1), 'en', 'Hello there');
+  assert.equal(synth, 0, 'free server: the device voice reads it, no ElevenLabs request');
+  (w as any).speak((w as any).streams.get(2), 'en', 'Hello there');
+  assert.equal(synth, 1, 'paid server: AI voice');
+  w.stop();
+});

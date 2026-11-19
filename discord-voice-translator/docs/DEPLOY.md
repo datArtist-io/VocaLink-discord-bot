@@ -33,7 +33,9 @@ Optional:
 | `DEV_GUILD_ID` | none | registers commands instantly in one test server |
 | `ELEVENLABS_CONCURRENCY` | `3` | how many speech requests run at once; set it to your ElevenLabs plan's limit (2 on the free plan) |
 | `DEFAULT_SPOKEN_LANGS` | `tl,en` | languages a new server starts with |
-| `PRIVACY_URL` | none | link shown in the notice the bot posts when it starts |
+| `PRIVACY_URL`, `TERMS_URL` | none | links shown in the notice the bot posts when it starts |
+| `SKU_PLUS`, `SKU_PRO` | none | Discord shop SKU ids for the paid plans; see [PRODUCT.md](PRODUCT.md) |
+| `PLAN_FREE_HOURS`, `PLAN_PLUS_HOURS`, `PLAN_PRO_HOURS` | 3, 30, 60 | monthly hours per server for each plan |
 | `DB_PATH` | `/data/edge.sqlite` | where settings are stored |
 
 Remove `WORKER_URLS` if it is set; it switches the bot to the self-hosted pipeline.

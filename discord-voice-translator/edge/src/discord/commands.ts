@@ -144,4 +144,5 @@ export const SIMPLE_COMMANDS = [
   { name: 'listen', description: 'Hear only your language, in your own player', contexts: [0], options: [lang('lang', 'Your language')] },
   { name: 'optout', description: 'Never translate or process my voice', contexts: [0] },
   { name: 'optin', description: 'Allow my voice to be translated again', contexts: [0] },
+  { name: 'plan', description: "See this server's plan and hours left, or upgrade", contexts: [0] },
 ];

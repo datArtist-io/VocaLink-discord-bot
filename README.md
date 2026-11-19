@@ -36,6 +36,7 @@ Measured on the production setup, a translated phrase reaches the listener about
 | `/setup` | Server admins pick up to three server languages, the channel voice and captions. |
 | `/listen` | Opens your personal translator: pick your language, volume and how others hear you. |
 | `/optout`, `/optin` | Stop or allow processing of your voice, in every server, immediately. |
+| `/plan` | Shows the server's plan and hours left this month, with Discord's buttons to upgrade. |
 
 The usual flow is: an admin runs `/setup` once, someone runs `/translate start`, and each person taps **Open my translator**.
 
@@ -79,6 +80,7 @@ discord-voice-translator/
 
 - [Architecture](discord-voice-translator/docs/ARCHITECTURE.md): the pipeline in detail and the design decisions behind it.
 - [Deploying on Railway](discord-voice-translator/docs/DEPLOY.md)
+- [The product](discord-voice-translator/docs/PRODUCT.md): the website, plans, Discord shop payments and how they connect.
 - [Privacy and data](discord-voice-translator/docs/PRIVACY.md)
 - [Self-hosted pipeline](discord-voice-translator/docs/self-hosted/ARCHITECTURE.md): the original design with open-source models.
 

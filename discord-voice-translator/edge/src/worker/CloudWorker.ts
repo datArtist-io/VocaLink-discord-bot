@@ -78,6 +78,10 @@ export interface CloudWorkerOptions {
   voiceBank?: VoiceBank;
   /** Optional HTTP agent for the Soniox WebSocket (e.g. behind an HTTPS proxy). */
   wsAgent?: import('node:http').Agent;
+  /** called with the ms of each speaker's audio that is sent for translation (plan usage) */
+  onAudio?: (guildId: string, ms: number) => void;
+  /** false = this server's plan has no AI voices; listeners' devices read translations aloud instead */
+  aiVoice?: (guildId: string) => boolean;
   log?: Logger;
 }
 
@@ -176,7 +180,7 @@ export class CloudWorker extends EventEmitter {
   private replayers = new Set<() => Json[]>();
   private sweeper: NodeJS.Timeout | null = null;
   private readonly log: Logger;
-  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent' | 'elevenVoiceId' | 'voiceBank'>> & { wsAgent?: import('node:http').Agent; elevenVoiceId?: string; voiceBank?: VoiceBank };
+  private readonly o: Required<Omit<CloudWorkerOptions, 'log' | 'wsAgent' | 'elevenVoiceId' | 'voiceBank' | 'onAudio' | 'aiVoice'>> & { wsAgent?: import('node:http').Agent; elevenVoiceId?: string; voiceBank?: VoiceBank; onAudio?: CloudWorkerOptions['onAudio']; aiVoice?: CloudWorkerOptions['aiVoice'] };
   /** guildId -> userId -> voice id (stable for the whole call) */
   private voiceOf = new Map<string, Map<string, string>>();
   private lastWarm = 0;
@@ -199,6 +203,8 @@ export class CloudWorker extends EventEmitter {
       wsAgent: opts.wsAgent,
       elevenConcurrency: Math.max(1, opts.elevenConcurrency ?? 3),
       voiceBank: opts.voiceBank,
+      onAudio: opts.onAudio,
+      aiVoice: opts.aiVoice,
     };
     this.log = opts.log ?? createLogger('cloud');
   }
@@ -282,6 +288,7 @@ export class CloudWorker extends EventEmitter {
     s.lastAudioAt = performance.now();
     const at = s.audioMs; // this frame's position on the speaker's audio clock
     s.audioMs += pcm.length / 32; // 16 kHz s16 = 32 bytes per ms
+    this.o.onAudio?.(s.guildId, pcm.length / 32);
     this.syncLanes(s);
     for (const lane of s.lanes.values()) {
       if (!lane.ws && !lane.closing && s.lastAudioAt >= lane.retryAt) this.openLane(s, lane);
@@ -683,6 +690,7 @@ export class CloudWorker extends EventEmitter {
   private speak(s: Stream, lang: string, text: string): void {
     const elLang = ELEVEN_LANGS[lang];
     if (!elLang || this.streams.get(s.sid) !== s) return; // speaker left / opted out: don't generate
+    if (this.o.aiVoice && !this.o.aiVoice(s.guildId)) return; // plan without AI voices: devices speak the captions
     const dubId = dubSeq++;
     const ctrl = new AbortController();
     const startedAt = performance.now();

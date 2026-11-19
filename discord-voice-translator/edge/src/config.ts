@@ -36,6 +36,9 @@ export interface EdgeConfig {
   daveFailureTolerance: number;
   consentVersion: string;
   privacyUrl: string;
+  termsUrl: string;
+  /** Discord shop SKU ids for the paid plans; empty = plans off (everything unlimited) */
+  billing: { skuPlus: string | null; skuPro: string | null; hours: { free?: number; plus?: number; pro?: number } };
 }
 
 /** A number from the environment; empty or invalid values fall back to the default. */
@@ -97,5 +100,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { require
     daveFailureTolerance: num(env.DAVE_FAILURE_TOLERANCE, 36),
     consentVersion: env.CONSENT_VERSION ?? '2026-10-v1',
     privacyUrl: env.PRIVACY_URL ?? '',
+    termsUrl: env.TERMS_URL ?? '',
+    billing: {
+      skuPlus: env.SKU_PLUS?.trim() || null,
+      skuPro: env.SKU_PRO?.trim() || null,
+      hours: {
+        free: env.PLAN_FREE_HOURS ? num(env.PLAN_FREE_HOURS, 3) : undefined,
+        plus: env.PLAN_PLUS_HOURS ? num(env.PLAN_PLUS_HOURS, 30) : undefined,
+        pro: env.PLAN_PRO_HOURS ? num(env.PLAN_PRO_HOURS, 60) : undefined,
+      },
+    },
   };
 }

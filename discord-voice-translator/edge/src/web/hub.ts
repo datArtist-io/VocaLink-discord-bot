@@ -33,6 +33,8 @@ export interface HubSession {
 let nextId = 1;
 
 export class WebHub {
+  /** 'device' = this server's plan has no AI voices, so each player reads translations aloud itself */
+  voiceMode: (guildId: string) => 'ai' | 'device' = () => 'ai';
   private listeners = new Map<string, Set<Listener>>(); // guildId -> listeners
   private sessions = new Map<string, HubSession>();
   stats = { audioFramesSent: 0, dropped: 0 };
@@ -41,7 +43,7 @@ export class WebHub {
     this.sessions.set(guildId, s);
     s.setWebLangs(this.langs(guildId));
     // players opened before the call started: tell them it's live now
-    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'status', live: true, lang: l.lang });
+    for (const l of this.listeners.get(guildId) ?? []) this.sendJson(l, { type: 'status', live: true, lang: l.lang, voice: this.voiceMode(guildId) });
   }
 
   unregisterSession(guildId: string): void {
@@ -62,14 +64,14 @@ export class WebHub {
     set.add(l);
     this.sync(guildId);
     const s = this.sessions.get(guildId);
-    this.sendJson(l, { type: 'status', live: Boolean(s), lang, session: s?.describe() ?? null });
+    this.sendJson(l, { type: 'status', live: Boolean(s), lang, session: s?.describe() ?? null, voice: this.voiceMode(guildId) });
     return l;
   }
 
   setLang(l: Listener, lang: string): void {
     l.lang = lang;
     this.sync(l.guildId);
-    this.sendJson(l, { type: 'status', live: this.sessions.has(l.guildId), lang });
+    this.sendJson(l, { type: 'status', live: this.sessions.has(l.guildId), lang, voice: this.voiceMode(l.guildId) });
   }
 
   /** The user picked a language in Discord: switch any player they have open. */

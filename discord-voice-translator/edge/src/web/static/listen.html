@@ -94,6 +94,23 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
 
   let lang = q.get('lang') || (q.get('pick') ? '' : (localStorage.getItem('vl_lang') || ''));
   let ws = null, ctx = null, master = null, duck = null;
+  // On plans without AI voices the bot sends text only, and this device reads it aloud.
+  let voiceMode = 'ai', youTalking = false;
+  const spokenKeys = new Set();
+  function deviceSpeak(text) {
+    if (!('speechSynthesis' in window) || !text) return;
+    const base = (lang || '').split('-')[0];
+    const want = base === 'tl' ? ['fil', 'tl'] : [base];
+    const vs = speechSynthesis.getVoices().filter(v => want.some(w => v.lang.toLowerCase().replace('_', '-').startsWith(w)));
+    const score = (v) => (/natural|neural|online|premium|enhanced/i.test(v.name) ? 2 : 0) + (/google/i.test(v.name) ? 1 : 0);
+    vs.sort((a, b) => score(b) - score(a));
+    if (speechSynthesis.pending) speechSynthesis.cancel(); // never fall behind the conversation
+    const u = new SpeechSynthesisUtterance(text);
+    if (vs[0]) { u.voice = vs[0]; u.lang = vs[0].lang; } else u.lang = lang;
+    u.volume = Math.max(0, Math.min(1, (+$('vol').value || 100) / 100 * (youTalking ? 0.3 : 1)));
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
+  }
   let playhead = 0;
   let fails = 0;
   let updatePending = false;
@@ -168,6 +185,10 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
     el.querySelector('.txt').textContent = txt;
     if (!same && m.final && m.text) { const o = document.createElement('div'); o.className = 'orig'; o.textContent = m.original; el.appendChild(o); }
     const feed = $('feed'); while (feed.children.length > 80) feed.lastElementChild.remove();
+    if (voiceMode === 'device' && m.final && !same && m.text && !spokenKeys.has(m.key)) {
+      spokenKeys.add(m.key); if (spokenKeys.size > 300) spokenKeys.delete(spokenKeys.values().next().value);
+      deviceSpeak(m.text);
+    }
   }
 
   // ---------------------------------------------------------------- audio
@@ -284,6 +305,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
   function speaking(m) {
     if (m.you) {
       // you're talking: others' translations step back so they never talk over you
+      youTalking = !!m.on;
       if (duck) duck.gain.setTargetAtTime(m.on ? 0.3 : 1, ctx.currentTime, m.on ? 0.04 : 0.25);
       return;
     }
@@ -317,6 +339,7 @@ header{display:flex;align-items:center;gap:10px;padding:6px 0 14px}
       return;
     }
     if (m.type === 'status') {
+      if (m.voice) voiceMode = m.voice;
       state(m.live ? 'Live' : 'Waiting for the call to start…', m.live);
       if (m.lang && m.lang !== lang) {
         lang = m.lang; try { localStorage.setItem('vl_lang', lang); } catch {}

@@ -1,5 +1,7 @@
 # VocaLink as a product
 
+> Paid plans are built but switched off. VocaLink is free for everyone, and the website shows no prices. The sections below describe how to turn plans on later.
+
 VocaLink comes in two forms that share one website and one look:
 
 | | VocaLink Lite (website) | VocaLink for Discord (bot) |
@@ -10,7 +12,7 @@ VocaLink comes in two forms that share one website and one look:
 | Translation | Google Translate (free) or Claude with the visitor's key | Soniox |
 | Voice | The visitor's browser | Each listener's device on Free and Plus; ElevenLabs on Pro |
 | Cost to VocaLink | Nothing | Soniox, ElevenLabs on Pro, and Railway |
-| Payment | Free | Discord's app shop, per server |
+| Payment | Free | Free (optional paid plans via Discord's app shop, off by default) |
 
 ## How someone pays
 

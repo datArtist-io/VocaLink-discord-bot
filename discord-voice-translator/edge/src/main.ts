@@ -80,7 +80,9 @@ async function main(): Promise<void> {
       try {
         const rest = new REST().setToken(cfg.discordToken);
         const route = cfg.devGuildId ? Routes.applicationGuildCommands(cfg.clientId, cfg.devGuildId) : Routes.applicationCommands(cfg.clientId);
-        await rest.put(route, { body: cfg.pipeline === 'cloud' ? SIMPLE_COMMANDS : COMMANDS });
+        // /plan only exists while paid plans are switched on (shop SKUs configured)
+        const simple = billing.enabled ? SIMPLE_COMMANDS : SIMPLE_COMMANDS.filter((c) => c.name !== 'plan');
+        await rest.put(route, { body: cfg.pipeline === 'cloud' ? simple : COMMANDS });
         log.info('slash commands registered', { scope: cfg.devGuildId ? `guild ${cfg.devGuildId}` : 'global' });
       } catch (e) {
         log.error('command registration failed', { err: e });

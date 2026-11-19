@@ -5,6 +5,8 @@
   </picture>
 </p>
 
+**Try it live: [vocalinktest.vercel.app](https://vocalinktest.vercel.app)**. The site runs VocaLink Lite in the browser and adds the bot to your Discord server.
+
 Live voice translation for Discord. People in a voice channel speak whatever language they like, and everyone hears the others in their own language, about a second behind the speaker.
 
 VocaLink was built for mixed Filipino and English groups first, so Tagalog, English and Taglish (both in one sentence) are handled as normal speech. Any other language works too.
